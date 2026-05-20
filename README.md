@@ -99,7 +99,7 @@ configs/train_containment_lambda_sweep.yaml
 loss_total = loss_yolo_pose + lambda_containment * loss_containment
 ```
 
-注意：当前入口已经提供 `PoseTrainer` 轻量 subclass 的位置和 run metadata 记录，但本机未安装 Ultralytics，且 Ultralytics pose loss 内部张量接口不是稳定公开 API。真实训练前必须先在目标环境里检查并接通预测 bbox/keypoint 张量；脚本默认拒绝直接训练，只有显式传入 `--enable-unstable-loss-hook` 才会尝试调用该实验 hook。
+注意：当前入口为 Ultralytics 8.4.x 的 `v8PoseLoss` 张量流实现了实验性 criterion subclass，会在 decoded predicted bbox 与 decoded predicted keypoints 上加入 containment 项。脚本默认拒绝直接训练，只有显式传入 `--enable-unstable-loss-hook` 才会启动该实验 hook；如果以后升级 Ultralytics，先用小 batch 检查 loss 张量形状。
 
 ## 推理
 

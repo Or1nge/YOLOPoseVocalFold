@@ -5,6 +5,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from types import MethodType
 from typing import Any
 
 import yaml
@@ -95,18 +96,94 @@ def synthetic_loss_smoke() -> dict[str, float]:
 def build_experimental_trainer(lambda_containment: float, containment_cfg: dict[str, Any]):
     try:
         from ultralytics.models.yolo.pose import PoseTrainer
+        from ultralytics.utils.loss import v8PoseLoss
     except ImportError as exc:
         raise SystemExit("ultralytics is not installed; use --dry-run or --smoke-loss on this host.") from exc
 
-    class ContainmentPoseTrainer(PoseTrainer):
-        """PoseTrainer subclass placeholder for the experimental loss branch.
+    class ContainmentPoseLoss(v8PoseLoss):
+        """YOLO-Pose loss with an added predicted-bbox/keypoint containment term.
 
-        Ultralytics does not expose a stable public callback for adding a term
-        to pose loss across versions. This subclass is intentionally explicit:
-        it records the intended loss settings and refuses full training until
-        the installed Ultralytics prediction/loss tensors are inspected and
-        wired in this branch.
+        This follows the Ultralytics 8.4.x `v8PoseLoss` tensor flow: decoded
+        predicted boxes and decoded predicted keypoints are both in anchor-grid
+        coordinates, so the containment term can be added without changing
+        preprocessing, assignment, or postprocessing.
         """
+
+        def __init__(self, model, tal_topk: int = 10, tal_topk2: int = 10):  # type: ignore[no-untyped-def]
+            super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
+            self.lambda_containment = float(lambda_containment)
+            self.containment_cfg = containment_cfg
+            self.last_containment_loss = None
+
+        def loss(self, preds, batch):  # type: ignore[no-untyped-def]
+            import torch
+
+            from yoloposevf.containment_loss import containment_penalty_torch
+
+            pred_kpts_raw = preds["kpts"].permute(0, 2, 1).contiguous()
+            pred_distri = preds["boxes"].permute(0, 2, 1).contiguous()
+            loss = torch.zeros(5, device=self.device)  # box, kpt_location, kpt_visibility, cls, dfl
+            (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor), det_loss, _ = (
+                self.get_assigned_targets_and_loss(preds, batch)
+            )
+            loss[0], loss[3], loss[4] = det_loss[0], det_loss[1], det_loss[2]
+
+            batch_size = pred_kpts_raw.shape[0]
+            imgsz = torch.tensor(
+                preds["feats"][0].shape[2:],
+                device=self.device,
+                dtype=pred_kpts_raw.dtype,
+            ) * self.stride[0]
+
+            pred_kpts = self.kpts_decode(anchor_points, pred_kpts_raw.view(batch_size, -1, *self.kpt_shape))
+            containment_loss = torch.zeros((), device=self.device, dtype=pred_kpts.dtype)
+
+            if fg_mask.sum():
+                keypoints = batch["keypoints"].to(self.device).float().clone()
+                keypoints[..., 0] *= imgsz[1]
+                keypoints[..., 1] *= imgsz[0]
+
+                loss[1], loss[2] = self.calculate_keypoints_loss(
+                    fg_mask,
+                    target_gt_idx,
+                    keypoints,
+                    batch["batch_idx"].view(-1, 1),
+                    stride_tensor,
+                    target_bboxes,
+                    pred_kpts,
+                )
+
+                if self.lambda_containment > 0:
+                    pred_bboxes = self.bbox_decode(anchor_points, pred_distri)
+                    selected_keypoints = self._select_target_keypoints(
+                        keypoints,
+                        batch["batch_idx"].view(-1, 1),
+                        target_gt_idx,
+                        fg_mask,
+                    )
+                    selected_keypoints[..., :2] /= stride_tensor.view(1, -1, 1, 1)
+                    visibility = (
+                        selected_keypoints[fg_mask][..., 2] != 0
+                        if selected_keypoints.shape[-1] == 3
+                        else None
+                    )
+                    containment_loss = containment_penalty_torch(
+                        pred_bboxes[fg_mask],
+                        pred_kpts[fg_mask][..., :2],
+                        visibility=visibility,
+                        margin=float(self.containment_cfg.get("margin", 0.0)),
+                        reduction=str(self.containment_cfg.get("reduction", "mean")),
+                        normalize_by_box_size=bool(self.containment_cfg.get("normalize_by_box_size", True)),
+                    )
+
+            loss[1] *= self.hyp.pose
+            loss[2] *= self.hyp.kobj
+            loss[1] += self.lambda_containment * containment_loss
+            self.last_containment_loss = containment_loss.detach()
+            return loss * batch_size, loss.detach()
+
+    class ContainmentPoseTrainer(PoseTrainer):
+        """PoseTrainer subclass that installs the containment-loss criterion."""
 
         containment_lambda = lambda_containment
         containment_loss_config = containment_cfg
@@ -115,6 +192,11 @@ def build_experimental_trainer(lambda_containment: float, containment_cfg: dict[
             model = super().get_model(cfg=cfg, weights=weights, verbose=verbose)
             model.containment_lambda = self.containment_lambda
             model.containment_loss_config = self.containment_loss_config
+
+            def init_criterion(pose_model):  # type: ignore[no-untyped-def]
+                return ContainmentPoseLoss(pose_model)
+
+            model.init_criterion = MethodType(init_criterion, model)
             return model
 
     return ContainmentPoseTrainer
@@ -124,8 +206,8 @@ def train_one(cfg: dict[str, Any], *, enable_unstable_loss_hook: bool) -> None:
     if not enable_unstable_loss_hook:
         raise SystemExit(
             "Refusing full training without --enable-unstable-loss-hook. "
-            "The reusable loss and sweep entry are dry-run/smoke verified; the Ultralytics loss tensor hook "
-            "must be wired against the installed Ultralytics version before real training."
+            "The containment criterion is wired for the Ultralytics 8.4.x v8PoseLoss tensor flow, but it is still "
+            "an experimental branch and should be launched deliberately."
         )
 
     try:
@@ -159,7 +241,7 @@ def train_one(cfg: dict[str, Any], *, enable_unstable_loss_hook: bool) -> None:
             **train_kwargs,
             "lambda_containment": lambda_containment,
             "containment_loss": containment_cfg,
-            "loss_hook_status": "trainer subclass created; prediction tensor addition requires version check",
+            "loss_hook_status": "ContainmentPoseLoss subclass installed via PoseModel.init_criterion",
         },
     )
     print(f"Training finished. Run folder: {save_dir}")

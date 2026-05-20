@@ -36,16 +36,15 @@ python3 tools/train_keypoint_containment.py --smoke-loss
 pytest tests/test_containment_loss.py
 ```
 
-`loss_containment` 对每个预测关键点计算其落在预测 bbox 外的 hinge 距离，可按 bbox 尺度归一化，并支持 visibility mask。所有关键点在框内时 loss 为 0。
+`loss_containment` 对每个预测关键点计算其落在预测 bbox 外的 hinge 距离，可按 bbox 尺度归一化，并支持 visibility mask。所有关键点在框内时 loss 为 0。默认 sweep 按 plan 采用 `0.0 / 0.01 / 0.05 / 0.1`。
 
 ### Ultralytics hook 状态
 
-本分支提供了 `PoseTrainer` subclass 接入点，但 Ultralytics 的 pose loss 预测张量不是稳定公开接口；不同版本可能需要不同的 decode 逻辑。当前代码默认拒绝直接启动真实训练，以避免误以为 loss 已经接进官方训练图。真实训练前需要在安装了 Ultralytics 和真实数据的环境里完成以下检查：
+本分支基于 Ultralytics 8.4.x 的 `v8PoseLoss` 实现了 `ContainmentPoseLoss` subclass，并通过 `PoseModel.init_criterion` 接入。该 hook 使用 decoded predicted bbox 与 decoded predicted keypoints 的同一 anchor-grid 坐标系，把 containment 项加到 pose-location loss 上。真实训练仍需显式传入 `--enable-unstable-loss-hook`，因为 Ultralytics 的 loss 内部张量不是稳定公开接口；不同版本可能需要调整 decode 逻辑。首次训练前需要在安装了 Ultralytics 和真实数据的环境里完成以下检查：
 
 1. 确认 `PoseTrainer` 和当前 Ultralytics 版本的 loss/prediction tensor 形状。
-2. 将预测 `bbox_xyxy` 和 `keypoints_xy` 接到 `containment_penalty_torch`。
-3. 用 1 个小 batch 验证 `loss_total` 中 containment 项非零且可反向传播。
-4. 再按 lambda sweep 运行完整训练。
+2. 用 1 个小 batch 验证 `loss_total` 中 containment 项非零且可反向传播。
+3. 再按 lambda sweep 运行完整训练。
 
 ## 比较指标
 
