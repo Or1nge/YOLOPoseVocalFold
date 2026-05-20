@@ -14,6 +14,7 @@ data/yolo_pose/*
 datasets/
 runs/
 Results/
+worktrees/
 *.pt
 *.onnx
 *.engine
@@ -26,4 +27,3 @@ Results/
 .DS_Store
 .idea/
 .vscode/
-
