@@ -58,6 +58,7 @@ def main() -> None:
 
     samples = []
     missing_predictions = []
+    invalid_predictions = []
     for label_path in sorted(labels_dir.glob("*.txt")):
         image_path = find_image(images_dir, label_path.stem)
         if image_path is None:
@@ -65,6 +66,9 @@ def main() -> None:
         prediction = predictions.get(label_path.stem)
         if prediction is None:
             missing_predictions.append(label_path.stem)
+            continue
+        if not prediction.get("final_bbox") or not prediction.get("keypoints"):
+            invalid_predictions.append(label_path.stem)
             continue
         with Image.open(image_path) as image:
             image_size = ImageSize(image.width, image.height)
@@ -103,6 +107,7 @@ def main() -> None:
 
     summary = summarize_metrics(samples)
     summary["missing_predictions"] = missing_predictions
+    summary["invalid_predictions"] = invalid_predictions
     summary_path = args.out_dir / f"{args.split}_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False))
