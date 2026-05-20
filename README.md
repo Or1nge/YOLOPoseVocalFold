@@ -76,6 +76,31 @@ python tools/train_yolo_pose.py --config configs/train_baseline.yaml
 
 训练输出写入 `Results/baseline/`，并在每个 run 目录内记录 `run_metadata.json`，包含命令、配置和 Git 版本信息。
 
+## 实验：keypoint-containment loss
+
+本分支只测试训练期 bbox/keypoint containment 约束，不改 `configs/postprocess.yaml` 或推理后处理逻辑。
+
+可先做无数据、无 Ultralytics 的配置和 loss smoke 检查：
+
+```bash
+python3 tools/train_keypoint_containment.py --dry-run
+python3 tools/train_keypoint_containment.py --smoke-loss
+```
+
+lambda sweep 配置在：
+
+```text
+configs/train_containment_lambda_sweep.yaml
+```
+
+实验 loss 模块在 `yoloposevf/containment_loss.py`，核心形式为：
+
+```text
+loss_total = loss_yolo_pose + lambda_containment * loss_containment
+```
+
+注意：当前入口已经提供 `PoseTrainer` 轻量 subclass 的位置和 run metadata 记录，但本机未安装 Ultralytics，且 Ultralytics pose loss 内部张量接口不是稳定公开 API。真实训练前必须先在目标环境里检查并接通预测 bbox/keypoint 张量；脚本默认拒绝直接训练，只有显式传入 `--enable-unstable-loss-hook` 才会尝试调用该实验 hook。
+
 ## 推理
 
 ```bash
@@ -117,4 +142,3 @@ exp/keypoint-containment-loss
 ```
 
 分支比较应使用同一批数据、同一套 split、同一套增强策略和同一套评估脚本。
-

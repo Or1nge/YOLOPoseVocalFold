@@ -1,0 +1,26 @@
+base:
+  model: yolo11n-pose.pt
+  data: data/yolo_pose/vocal_fold_pose.yaml
+  project: Results/containment_loss
+  imgsz: 640
+  epochs: 150
+  batch: 8
+  workers: 4
+  device: 0
+  patience: 40
+  seed: 42
+  exist_ok: false
+
+# This experiment changes training loss only. Keep postprocess.yaml unchanged.
+containment_loss:
+  margin: 0.0
+  normalize_by_box_size: true
+  reduction: mean
+
+sweep:
+  lambda_containment:
+    - 0.0
+    - 0.05
+    - 0.1
+    - 0.2
+    - 0.5
