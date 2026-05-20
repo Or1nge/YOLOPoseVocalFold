@@ -1,0 +1,27 @@
+model: yolo11n-pose.pt
+data: data/yolo_pose/vocal_fold_pose.yaml
+project: Results/baseline
+name: yolo_pose_baseline
+imgsz: 640
+epochs: 150
+batch: 8
+workers: 4
+device: 0
+patience: 40
+seed: 42
+exist_ok: false
+
+# Small-data defaults: preserve anatomy, avoid label-order-breaking flips.
+degrees: 8.0
+translate: 0.08
+scale: 0.20
+shear: 0.0
+perspective: 0.0
+fliplr: 0.0
+flipud: 0.0
+hsv_h: 0.01
+hsv_s: 0.25
+hsv_v: 0.25
+blur: 0.0
+close_mosaic: 10
+

@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local data and training outputs
+data/images/*
+data/labelme/*
+data/yolo_pose/*
+datasets/
+runs/
+Results/
+*.pt
+*.onnx
+*.engine
+
+# Keep data placeholders
+!data/images/.gitkeep
+!data/labelme/.gitkeep
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+

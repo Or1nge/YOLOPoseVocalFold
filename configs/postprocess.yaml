@@ -1,0 +1,10 @@
+kp_margin_x: 0.18
+kp_margin_y: 0.18
+min_keypoint_conf: 0.35
+high_keypoint_conf: 0.65
+review_threshold: 0.50
+auto_accept_threshold: 0.80
+low_consistency_iou: 0.35
+confidence_keypoint_mode: mean
+fusion_mode: union
+
