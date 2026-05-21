@@ -8,9 +8,12 @@ __pycache__/
 venv/
 
 # Local data and training outputs
-data/images/*
-data/labelme/*
-data/yolo_pose/*
+data/*
+!data/README.md
+!data/images/
+!data/images/.gitkeep
+!data/labelme/
+!data/labelme/.gitkeep
 datasets/
 runs/
 Results/
@@ -18,10 +21,6 @@ worktrees/
 *.pt
 *.onnx
 *.engine
-
-# Keep data placeholders
-!data/images/.gitkeep
-!data/labelme/.gitkeep
 
 # OS/editor
 .DS_Store
