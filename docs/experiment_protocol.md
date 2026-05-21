@@ -6,7 +6,7 @@
 
 1. LabelMe 转 YOLO-Pose 标签。
 2. 标准 YOLO-Pose 训练。
-3. 推理得到 `bbox + 4 keypoints + confidence`。
+3. 推理得到 `bbox + 3 keypoints + confidence`。
 4. 根据关键点生成 `bbox_keypoints`。
 5. 融合 `bbox_yolo` 与 `bbox_keypoints`。
 6. 计算 `final_confidence` 并输出 `auto_accept / manual_review / reject_or_relabel`。
@@ -33,4 +33,3 @@ loss_total = loss_yolo_pose + lambda * loss_containment
 - 失败样本类型
 
 只有当 containment loss 降低点在框外比例，同时不损害 bbox/keypoint 精度，才考虑合并回主线。
-

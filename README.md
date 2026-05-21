@@ -5,7 +5,7 @@ Anatomy-Constrained YOLO-Pose for Vocal Fold ROI Localization.
 本项目把声门/喉镜图像自动定位任务实现为：
 
 ```text
-image -> ROI bbox + 4 vocal-fold keypoints -> geometry fusion -> final_bbox + final_confidence
+image -> ROI bbox + 3 glottic keypoints -> geometry fusion -> final_bbox + final_confidence
 ```
 
 主分支只做稳定 baseline：标准 YOLO-Pose 训练 + 关键点几何后处理。实验性 `keypoint-containment loss` 放在独立 Git 分支 `exp/keypoint-containment-loss`。
@@ -40,8 +40,8 @@ data/labelme/
 
 每张 LabelMe JSON 默认需要：
 
-- 1 个框：`vocal_fold_roi`
-- 4 个点：`kp1`, `kp2`, `kp3`, `kp4`
+- 1 个框：`声门区域`
+- 3 个点：`前联合`, `左后方中点`, `右后方中点`
 
 如果标签名不同，改 `configs/keypoints.yaml`。
 
@@ -106,6 +106,17 @@ python tools/evaluate_predictions.py \
 
 评估会输出 bbox IoU、关键点 PCK、点是否落在框内、最终置信度和人工复核比例。
 
+## 几何调参
+
+转换脚本会在 `data/yolo_pose/roi_polygons/` 写出人工 ROI 多边形元数据，可用于调三点角平分线 ROI 的边距：
+
+```bash
+python tools/tune_geometry_roi.py \
+  --dataset-dir data/yolo_pose \
+  --split train \
+  --postprocess-out configs/postprocess_tuned.yaml
+```
+
 ## Git 分支
 
 ```text
@@ -117,4 +128,3 @@ exp/keypoint-containment-loss
 ```
 
 分支比较应使用同一批数据、同一套 split、同一套增强策略和同一套评估脚本。
-

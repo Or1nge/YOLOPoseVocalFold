@@ -50,9 +50,25 @@ def find_image(images_dir: Path, stem: str) -> Path | None:
     return None
 
 
+def read_roi_metadata(dataset_dir: Path, split: str) -> dict[str, dict[str, object]]:
+    path = dataset_dir / "roi_polygons" / f"{split}.jsonl"
+    if not path.exists():
+        return {}
+    records: dict[str, dict[str, object]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        stem = str(payload.get("stem", ""))
+        if stem:
+            records[stem] = payload
+    return records
+
+
 def main() -> None:
     args = parse_args()
     predictions = read_predictions(args.predictions)
+    roi_metadata = read_roi_metadata(args.dataset_dir, args.split)
     labels_dir = args.dataset_dir / "labels" / args.split
     images_dir = args.dataset_dir / "images" / args.split
 
@@ -73,6 +89,7 @@ def main() -> None:
         with Image.open(image_path) as image:
             image_size = ImageSize(image.width, image.height)
         target = read_yolo_pose_label(label_path, image_size)
+        roi_record = roi_metadata.get(label_path.stem, {})
         samples.append(
             evaluate_sample(
                 source=label_path.stem,
@@ -83,6 +100,8 @@ def main() -> None:
                 image_size=image_size,
                 action=str(prediction.get("action", "")),
                 final_confidence=float(prediction.get("final_confidence", 0.0)),
+                predicted_roi_polygon=prediction.get("roi_polygon"),
+                target_roi_polygon=roi_record.get("manual_roi_polygon"),
             )
         )
 
@@ -99,6 +118,8 @@ def main() -> None:
                 "pck",
                 "action",
                 "final_confidence",
+                "roi_polygon_containment_rate",
+                "roi_area_ratio_to_target",
             ],
         )
         writer.writeheader()

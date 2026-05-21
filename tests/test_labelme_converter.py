@@ -18,11 +18,10 @@ def test_labelme_conversion_creates_yolo_label(tmp_path: Path, monkeypatch) -> N
         "imageWidth": 100,
         "imageHeight": 80,
         "shapes": [
-            {"label": "vocal_fold_roi", "shape_type": "rectangle", "points": [[20, 20], [70, 60]]},
-            {"label": "kp1", "shape_type": "point", "points": [[25, 25]]},
-            {"label": "kp2", "shape_type": "point", "points": [[65, 25]]},
-            {"label": "kp3", "shape_type": "point", "points": [[25, 55]]},
-            {"label": "kp4", "shape_type": "point", "points": [[65, 55]]},
+            {"label": "声门区域", "shape_type": "polygon", "points": [[20, 20], [70, 20], [70, 60], [20, 60]]},
+            {"label": "前联合", "shape_type": "point", "points": [[45, 25]]},
+            {"label": "左后方中点", "shape_type": "point", "points": [[30, 55]]},
+            {"label": "右后方中点", "shape_type": "point", "points": [[60, 55]]},
         ],
     }
     (labelme_dir / "sample.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -49,5 +48,7 @@ def test_labelme_conversion_creates_yolo_label(tmp_path: Path, monkeypatch) -> N
     assert manifest["counts"]["train"] == 1
     label = out_dir / "labels" / "train" / "sample.txt"
     assert label.exists()
-    assert len(label.read_text(encoding="utf-8").split()) == 17
-
+    assert len(label.read_text(encoding="utf-8").split()) == 14
+    roi_records = out_dir / "roi_polygons" / "train.jsonl"
+    assert roi_records.exists()
+    assert json.loads(roi_records.read_text(encoding="utf-8"))["manual_roi_polygon"][0] == [20.0, 20.0]

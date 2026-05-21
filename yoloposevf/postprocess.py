@@ -6,12 +6,13 @@ from typing import Any, Sequence
 from yoloposevf.geometry import (
     BBox,
     ImageSize,
+    angle_bisector_roi_from_three_points,
     bbox_iou,
     clip_bbox,
     containment_rate,
-    expand_bbox,
     geometry_score,
     keypoint_bbox,
+    polygon_area,
     union_bbox,
 )
 
@@ -20,13 +21,19 @@ from yoloposevf.geometry import (
 class PostprocessConfig:
     kp_margin_x: float = 0.18
     kp_margin_y: float = 0.18
+    roi_base_backtrack_fraction: float = 0.10
+    roi_posterior_margin_fraction: float = 0.18
+    roi_side_margin_fraction: float = 0.18
+    roi_min_base_backtrack_px: float = 4.0
+    roi_min_posterior_margin_px: float = 4.0
+    roi_min_side_margin_px: float = 4.0
     min_keypoint_conf: float = 0.35
     high_keypoint_conf: float = 0.65
     review_threshold: float = 0.50
     auto_accept_threshold: float = 0.80
     low_consistency_iou: float = 0.35
     confidence_keypoint_mode: str = "mean"
-    fusion_mode: str = "union"
+    fusion_mode: str = "angle_bisector"
 
 
 @dataclass(frozen=True)
@@ -72,8 +79,24 @@ def fuse_prediction(prediction: PosePrediction, cfg: PostprocessConfig) -> dict[
     keypoints = [tuple(map(float, kp)) for kp in prediction.keypoints]
     selected_kps = _select_keypoints(keypoints, cfg.min_keypoint_conf)
     flags: list[str] = []
+    roi_polygon: list[list[float]] | None = None
+    roi_area: float | None = None
 
-    if len(selected_kps) >= 2:
+    if len(selected_kps) == 3:
+        roi = angle_bisector_roi_from_three_points(
+            selected_kps,
+            image_size=prediction.image_size,
+            base_backtrack_fraction=cfg.roi_base_backtrack_fraction,
+            posterior_margin_fraction=cfg.roi_posterior_margin_fraction,
+            side_margin_fraction=cfg.roi_side_margin_fraction,
+            min_base_backtrack_px=cfg.roi_min_base_backtrack_px,
+            min_posterior_margin_px=cfg.roi_min_posterior_margin_px,
+            min_side_margin_px=cfg.roi_min_side_margin_px,
+        )
+        bbox_kp = roi.bbox_xyxy
+        roi_polygon = [list(point) for point in roi.polygon]
+        roi_area = polygon_area(roi.polygon)
+    elif len(selected_kps) >= 2:
         bbox_kp = keypoint_bbox(
             selected_kps,
             margin_x=cfg.kp_margin_x,
@@ -84,7 +107,9 @@ def fuse_prediction(prediction: PosePrediction, cfg: PostprocessConfig) -> dict[
         bbox_kp = bbox_yolo
         flags.append("too_few_reliable_keypoints")
 
-    if cfg.fusion_mode == "keypoints" and len(selected_kps) == 4:
+    if cfg.fusion_mode in {"angle_bisector", "keypoints"} and len(selected_kps) == 3:
+        final_bbox = bbox_kp
+    elif cfg.fusion_mode == "keypoints" and len(selected_kps) >= 2:
         final_bbox = bbox_kp
     elif cfg.fusion_mode == "yolo":
         final_bbox = bbox_yolo
@@ -115,6 +140,8 @@ def fuse_prediction(prediction: PosePrediction, cfg: PostprocessConfig) -> dict[
         "source": prediction.source,
         "bbox_yolo": list(bbox_yolo),
         "bbox_keypoints": list(bbox_kp),
+        "roi_polygon": roi_polygon,
+        "roi_polygon_area": roi_area,
         "final_bbox": list(final_bbox),
         "bbox_confidence": float(prediction.bbox_conf),
         "keypoint_confidence": kp_conf,
