@@ -1,7 +1,7 @@
 model: yolo11n-pose.pt
 data: data/yolo_pose/vocal_fold_pose.yaml
-project: Results/baseline
-name: yolo_pose_baseline
+project: Results/glottic_three_point
+name: yolo_pose_glottic_three_point
 imgsz: 640
 epochs: 150
 batch: 8

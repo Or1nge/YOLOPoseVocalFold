@@ -5,6 +5,7 @@
 - Updated the baseline annotation contract from 4 generic keypoints to 3 glottic keypoints.
 - Added duplicate-aware conversion metadata, ROI polygon evaluation, and geometry tuning.
 - Added flexible YOLO-Pose label parsing for variable keypoint counts.
+- Renamed the baseline training run output for the glottic three-point setup.
 - Kept local data directories ignored before publishing the private GitHub remote.
 
 ## 0.1.0 - 2026-05-20
