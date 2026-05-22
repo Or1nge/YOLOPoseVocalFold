@@ -79,14 +79,15 @@ def prepare_inference_images(
     metadata: dict[str, dict[str, Any]] = {}
     if not blackpad_enabled:
         for image_path in images:
+            resolved = image_path.resolve()
             metadata[str(image_path.resolve())] = {
-                "source": str(image_path),
-                "original_source": str(image_path),
+                "source": str(resolved),
+                "original_source": str(resolved),
                 "preprocess": {"type": "none"},
             }
         return images, metadata
 
-    pad_root = blackpad_input_dir or default_blackpad_input_dir(out_path)
+    pad_root = (blackpad_input_dir or default_blackpad_input_dir(out_path)).resolve()
     padded_images: list[Path] = []
     for image_path in images:
         rel = relative_image_path(image_path, source)
@@ -99,8 +100,8 @@ def prepare_inference_images(
         )
         padded_images.append(destination)
         metadata[str(destination.resolve())] = {
-            "source": str(destination),
-            "original_source": str(image_path),
+            "source": str(destination.resolve()),
+            "original_source": str(image_path.resolve()),
             "preprocess": info.to_dict(),
         }
     return padded_images, metadata
@@ -346,9 +347,9 @@ def main() -> None:
     if args.source.is_file():
         predict_source = str(images[0]) if images else str(args.source)
     elif not args.no_blackpad:
-        predict_source = str((args.blackpad_input_dir or default_blackpad_input_dir(args.out)))
+        predict_source = str((args.blackpad_input_dir or default_blackpad_input_dir(args.out)).resolve())
     else:
-        predict_source = str(args.source)
+        predict_source = str(args.source.resolve())
     predict_kwargs: dict[str, Any] = {"source": predict_source, "conf": args.conf, "stream": True}
     if args.device is not None:
         predict_kwargs["device"] = args.device
