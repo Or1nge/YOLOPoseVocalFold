@@ -1,6 +1,6 @@
 base:
   model: yolo11m-pose.pt
-  data: /home/or1ngelinux/CVProjects/Larynx/YOLOPoseVocalFold/data/yolo_pose/vocal_fold_pose.yaml
+  data: data/yolo_pose/vocal_fold_pose.yaml
   project: Results/containment_loss
   name: yolo_pose_glottic_three_point_y11m_img960_pose24_containment_l0p05
   imgsz: 960

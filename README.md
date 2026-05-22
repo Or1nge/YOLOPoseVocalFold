@@ -70,7 +70,7 @@ python tools/validate_dataset.py --dataset-dir data/yolo_pose
 
 ```bash
 python tools/add_negative_images_to_yolo_pose.py \
-  --base-dataset /home/or1ngelinux/CVProjects/Larynx/YOLOPoseVocalFold/data/yolo_pose \
+  --base-dataset data/yolo_pose \
   --negative-source-dir /home/or1ngelinux/CVProjects/Larynx/Laryngeal_Dataset_Processed/混杂图片 \
   --out-dir data/yolo_pose_mixed_negative_60 \
   --count 60 \
@@ -154,7 +154,7 @@ good_roi_dark_fraction = 0.20
 python tools/train_keypoint_containment.py \
   --config configs/train_containment_lambda_sweep.yaml \
   --lambda-containment 0.05 \
-  --data /home/or1ngelinux/CVProjects/Larynx/YOLOPoseVocalFold/data/yolo_pose/vocal_fold_pose.yaml \
+  --data data/yolo_pose/vocal_fold_pose.yaml \
   --device 0 \
   --enable-unstable-loss-hook
 ```

@@ -1,5 +1,5 @@
 base:
-  model: /home/or1ngelinux/CVProjects/Larynx/YOLOPoseVocalFold/worktrees/exp_keypoint_containment_loss/Results/containment_loss/yolo_pose_glottic_three_point_y11m_img960_pose24_containment_l0p05_mixedneg60/weights/best.pt
+  model: Results/containment_loss/yolo_pose_glottic_three_point_y11m_img960_pose24_containment_l0p05_mixedneg60/weights/best.pt
   data: data/yolo_pose_ldp_pseudo_mixedpenalty_copy/vocal_fold_pose.yaml
   project: Results/containment_loss
   name: yolo_pose_glottic_three_point_y11m_img960_pose24_containment_l0p05_ldp_pseudo_mixedpenalty_copy
