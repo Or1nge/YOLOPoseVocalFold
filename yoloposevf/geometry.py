@@ -148,6 +148,21 @@ def angle_bisector_direction(
     return _unit_vector(bisector, fallback=midpoint_vec)
 
 
+def included_angle_degrees(
+    vertex: Sequence[float],
+    first: Sequence[float],
+    second: Sequence[float],
+) -> float:
+    first_vec = _sub(first, vertex)
+    second_vec = _sub(second, vertex)
+    first_length = hypot(first_vec[0], first_vec[1])
+    second_length = hypot(second_vec[0], second_vec[1])
+    if first_length <= 1e-8 or second_length <= 1e-8:
+        return 0.0
+    cosine = clamp(_dot(first_vec, second_vec) / (first_length * second_length), -1.0, 1.0)
+    return float(degrees(acos(cosine)))
+
+
 def angle_bisector_roi_from_three_points(
     keypoints: Sequence[Sequence[float]],
     image_size: ImageSize | None = None,
@@ -175,24 +190,27 @@ def angle_bisector_roi_from_three_points(
         )
         posterior_depth = max(distance(anterior, midpoint), distance(anterior, left_posterior), 1.0)
 
-    lateral_extent = max(abs(_dot(offset, normal)) for offset in posterior_offsets)
-    lateral_extent = max(lateral_extent, distance(left_posterior, right_posterior) / 2.0, 1.0)
+    lateral_offsets = [_dot(offset, normal) for offset in posterior_offsets]
+    negative_extent = max((-offset for offset in lateral_offsets if offset < 0.0), default=0.0)
+    positive_extent = max((offset for offset in lateral_offsets if offset > 0.0), default=0.0)
 
     backtrack = max(min_base_backtrack_px, posterior_depth * max(base_backtrack_fraction, 0.0))
     posterior_margin = max(
         min_posterior_margin_px,
         posterior_depth * max(posterior_margin_fraction, 0.0),
     )
-    side_margin = max(min_side_margin_px, lateral_extent * max(side_margin_fraction, 0.0))
-    half_width = lateral_extent + side_margin
+    side_margin_fraction = max(side_margin_fraction, 0.0)
+    negative_half_width = negative_extent + max(min_side_margin_px, negative_extent * side_margin_fraction)
+    positive_half_width = positive_extent + max(min_side_margin_px, positive_extent * side_margin_fraction)
+    half_width = max(negative_half_width, positive_half_width)
     height = backtrack + posterior_depth + posterior_margin
 
     base_center = _add(anterior, _mul(direction, -backtrack))
     far_center = _add(base_center, _mul(direction, height))
-    left_base = _add(base_center, _mul(normal, -half_width))
-    right_base = _add(base_center, _mul(normal, half_width))
-    right_far = _add(far_center, _mul(normal, half_width))
-    left_far = _add(far_center, _mul(normal, -half_width))
+    left_base = _add(base_center, _mul(normal, -negative_half_width))
+    right_base = _add(base_center, _mul(normal, positive_half_width))
+    right_far = _add(far_center, _mul(normal, positive_half_width))
+    left_far = _add(far_center, _mul(normal, -negative_half_width))
     polygon: Polygon = (left_base, right_base, right_far, left_far)
     bbox = points_bbox(polygon, image_size=image_size)
     return OrientedROI(
@@ -278,6 +296,45 @@ def polygon_containment_rate(
         return 0.0
     intersection = convex_polygon_intersection(target_polygon, containing_polygon)
     return float(clamp(polygon_area(intersection) / target_area, 0.0, 1.0))
+
+
+def contains_point_in_polygon(
+    polygon: Sequence[Sequence[float]],
+    point: Sequence[float],
+    tolerance: float = 1e-6,
+) -> bool:
+    if len(polygon) < 3:
+        return False
+    x, y = float(point[0]), float(point[1])
+    inside = False
+    previous = polygon[-1]
+    for current in polygon:
+        x1, y1 = float(previous[0]), float(previous[1])
+        x2, y2 = float(current[0]), float(current[1])
+        edge_x, edge_y = x2 - x1, y2 - y1
+        point_x, point_y = x - x1, y - y1
+        cross = edge_x * point_y - edge_y * point_x
+        dot = point_x * edge_x + point_y * edge_y
+        edge_len_sq = edge_x * edge_x + edge_y * edge_y
+        if abs(cross) <= tolerance and -tolerance <= dot <= edge_len_sq + tolerance:
+            return True
+        if (y1 > y) != (y2 > y):
+            x_intersect = (x2 - x1) * (y - y1) / (y2 - y1) + x1
+            if x <= x_intersect + tolerance:
+                inside = not inside
+        previous = current
+    return inside
+
+
+def polygon_keypoint_containment_rate(
+    polygon: Sequence[Sequence[float]],
+    keypoints: Sequence[Sequence[float]],
+) -> float:
+    points = list(keypoints)
+    if not points:
+        return 0.0
+    inside = sum(1 for point in points if contains_point_in_polygon(polygon, point))
+    return inside / len(points)
 
 
 def keypoint_bbox(
@@ -379,10 +436,23 @@ def geometry_score(
     max_area_ratio: float = 0.75,
     min_aspect: float = 0.35,
     max_aspect: float = 5.0,
+    min_glottic_angle_degrees: float = 20.0,
+    good_glottic_angle_degrees: float = 35.0,
+    max_glottic_angle_degrees: float = 130.0,
 ) -> float:
     points = [tuple(map(float, point[:2])) for point in keypoints if len(point) >= 2]
     if len(points) == 3:
         anterior, left_posterior, right_posterior = points
+        glottic_angle = included_angle_degrees(anterior, left_posterior, right_posterior)
+        if glottic_angle < min_glottic_angle_degrees or glottic_angle > max_glottic_angle_degrees:
+            return 0.0
+        angle_score = _soft_score(
+            glottic_angle,
+            good=good_glottic_angle_degrees,
+            bad=min_glottic_angle_degrees,
+            larger_is_worse=False,
+        )
+
         direction = angle_bisector_direction(anterior, left_posterior, right_posterior)
         posterior_offsets = [_sub(left_posterior, anterior), _sub(right_posterior, anterior)]
         posterior_depths = [_dot(offset, direction) for offset in posterior_offsets]
@@ -410,7 +480,7 @@ def geometry_score(
             area_score = 0.4 if 0.001 <= area_ratio <= 0.95 else 0.0
 
         contain_score = containment_rate(bbox, points)
-        scores = [posterior_score, opening_score, aspect_score, area_score, contain_score]
+        scores = [posterior_score, opening_score, angle_score, aspect_score, area_score, contain_score]
         return float(clamp(sum(scores) / len(scores), 0.0, 1.0))
 
     if len(points) != 4:

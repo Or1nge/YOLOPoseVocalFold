@@ -3,10 +3,25 @@ from yoloposevf.geometry import (
     angle_bisector_roi_from_three_points,
     bbox_iou,
     containment_rate,
+    geometry_score,
     keypoint_bbox,
+    included_angle_degrees,
+    polygon_keypoint_containment_rate,
     polygon_containment_rate,
 )
 from yoloposevf.postprocess import PosePrediction, PostprocessConfig, fuse_prediction
+
+
+def _sub(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float]:
+    return a[0] - b[0], a[1] - b[1]
+
+
+def _dot(a: tuple[float, float], b: tuple[float, float]) -> float:
+    return a[0] * b[0] + a[1] * b[1]
+
+
+def _cross(a: tuple[float, float], b: tuple[float, float]) -> float:
+    return a[0] * b[1] - a[1] * b[0]
 
 
 def test_keypoint_bbox_expands_and_clips() -> None:
@@ -50,3 +65,152 @@ def test_angle_bisector_roi_contains_target_polygon() -> None:
     )
     target = ((35, 75), (65, 75), (78, 22), (22, 22))
     assert polygon_containment_rate(target, roi.polygon) >= 0.95
+
+
+def test_angle_bisector_roi_allows_asymmetric_lateral_widths() -> None:
+    keypoints = [(50, 80, 2), (25, 20, 2), (100, 70, 2)]
+    roi = angle_bisector_roi_from_three_points(
+        keypoints,
+        base_backtrack_fraction=0.10,
+        posterior_margin_fraction=0.12,
+        side_margin_fraction=0.0,
+        min_side_margin_px=0.0,
+    )
+
+    left_width = -_dot(_sub(roi.polygon[0], roi.base_center), roi.normal)
+    right_width = _dot(_sub(roi.polygon[1], roi.base_center), roi.normal)
+    parallel_edge = _sub(roi.polygon[2], roi.polygon[1])
+
+    assert abs(left_width - right_width) > 5.0
+    assert abs(_cross(parallel_edge, roi.direction)) < 1e-6
+    assert polygon_keypoint_containment_rate(roi.polygon, [point[:2] for point in keypoints]) == 1.0
+
+
+def test_three_point_geometry_rejects_implausibly_small_angle() -> None:
+    image_size = ImageSize(width=100, height=100)
+    nearly_collinear = [(50, 80, 2), (52, 20, 2), (53, 10, 2)]
+    plausible = [(50, 80, 2), (25, 20, 2), (75, 20, 2)]
+
+    assert included_angle_degrees(nearly_collinear[0], nearly_collinear[1], nearly_collinear[2]) < 20.0
+    assert geometry_score(nearly_collinear, (20, 10, 80, 90), image_size) == 0.0
+    assert geometry_score(plausible, (20, 10, 80, 90), image_size) > 0.0
+
+
+def test_confidence_power_curve_preserves_gamma_behavior() -> None:
+    prediction = PosePrediction(
+        bbox=(20, 20, 80, 80),
+        bbox_conf=0.60,
+        keypoints=((50, 70, 0.90), (30, 30, 0.90), (70, 30, 0.90)),
+        image_size=ImageSize(width=100, height=100),
+        source="sample.png",
+    )
+
+    linear = fuse_prediction(prediction, PostprocessConfig(confidence_curve="power", confidence_gamma=1.0))
+    squared = fuse_prediction(prediction, PostprocessConfig(confidence_curve="power", confidence_gamma=2.0))
+
+    assert squared["bbox_confidence_factor"] == prediction.bbox_conf**2
+    assert squared["keypoint_confidence_factor"] < linear["keypoint_confidence_factor"]
+    assert squared["final_confidence"] < linear["final_confidence"]
+
+
+def test_confidence_tanh_curve_sharpens_without_squaring_high_confidence() -> None:
+    low = PosePrediction(
+        bbox=(20, 20, 80, 80),
+        bbox_conf=0.40,
+        keypoints=((50, 70, 0.40), (30, 30, 0.40), (70, 30, 0.40)),
+        image_size=ImageSize(width=100, height=100),
+        source="low.png",
+    )
+    high = PosePrediction(
+        bbox=(20, 20, 80, 80),
+        bbox_conf=0.90,
+        keypoints=((50, 70, 0.90), (30, 30, 0.90), (70, 30, 0.90)),
+        image_size=ImageSize(width=100, height=100),
+        source="high.png",
+    )
+    cfg = PostprocessConfig(
+        confidence_curve="tanh",
+        confidence_tanh_midpoint=0.65,
+        confidence_tanh_steepness=6.0,
+    )
+
+    low_out = fuse_prediction(low, cfg)
+    high_out = fuse_prediction(high, cfg)
+
+    assert low_out["bbox_confidence_factor"] < 0.40
+    assert high_out["bbox_confidence_factor"] > 0.90
+    assert low_out["final_confidence"] < high_out["final_confidence"]
+
+
+def test_tiny_three_point_roi_can_force_rejection() -> None:
+    prediction = PosePrediction(
+        bbox=(450, 450, 550, 550),
+        bbox_conf=0.95,
+        keypoints=((500, 530, 0.99), (470, 470, 0.99), (530, 470, 0.99)),
+        image_size=ImageSize(width=1000, height=1000),
+        source="tiny.png",
+    )
+
+    output = fuse_prediction(
+        prediction,
+        PostprocessConfig(
+            confidence_gamma=2.0,
+            min_roi_area_ratio=0.03,
+            good_roi_area_ratio=0.08,
+        ),
+    )
+
+    assert output["roi_area_ratio"] < 0.03
+    assert output["roi_area_factor"] == 0.0
+    assert output["action"] == "reject_or_relabel"
+    assert output["usable_box_polygon"] is None
+    assert "roi_area_too_small" in output["flags"]
+
+
+def test_keypoint_outside_image_bounds_forces_rejection() -> None:
+    prediction = PosePrediction(
+        bbox=(20, 20, 80, 80),
+        bbox_conf=0.95,
+        keypoints=((50, 70, 0.99), (30, 30, 0.99), (70, 106, 0.99)),
+        image_size=ImageSize(width=100, height=100),
+        source="outside.png",
+    )
+
+    output = fuse_prediction(
+        prediction,
+        PostprocessConfig(
+            confidence_gamma=2.0,
+            keypoint_image_bounds_tolerance_px=5.0,
+        ),
+    )
+
+    assert output["max_keypoint_outside_image_px"] == 6.0
+    assert output["image_bounds_factor"] == 0.0
+    assert output["action"] == "reject_or_relabel"
+    assert output["usable_box_polygon"] is None
+    assert "keypoints_outside_image" in output["flags"]
+
+
+def test_inverted_anterior_point_orientation_forces_rejection() -> None:
+    prediction = PosePrediction(
+        bbox=(20, 20, 80, 80),
+        bbox_conf=0.95,
+        keypoints=((50, 30, 0.99), (30, 70, 0.99), (70, 70, 0.99)),
+        image_size=ImageSize(width=100, height=100),
+        source="inverted.png",
+    )
+
+    output = fuse_prediction(
+        prediction,
+        PostprocessConfig(
+            confidence_gamma=2.0,
+            min_anterior_y_offset_ratio=0.0,
+            good_anterior_y_offset_ratio=0.10,
+        ),
+    )
+
+    assert output["anterior_y_offset_ratio"] < 0.0
+    assert output["anterior_position_factor"] == 0.0
+    assert output["action"] == "reject_or_relabel"
+    assert output["usable_box_polygon"] is None
+    assert "anterior_point_not_below_posterior_points" in output["flags"]

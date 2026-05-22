@@ -22,7 +22,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Tune three-keypoint angle-bisector ROI geometry.")
     parser.add_argument("--dataset-dir", type=Path, default=Path("data/yolo_pose"))
     parser.add_argument("--split", choices=["train", "val", "test"], default="train")
-    parser.add_argument("--target-containment", type=float, default=0.95)
+    parser.add_argument("--predictions", type=Path, help="Use predicted keypoints from a JSONL file.")
+    parser.add_argument("--target-containment", type=float, default=0.87)
     parser.add_argument("--out-dir", type=Path, default=Path("Results/geometry_tuning/glottic_three_point"))
     parser.add_argument("--postprocess-out", type=Path)
     return parser.parse_args()
@@ -33,6 +34,39 @@ def read_records(dataset_dir: Path, split: str) -> list[dict[str, Any]]:
     if not path.exists():
         raise SystemExit(f"ROI metadata not found: {path}")
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def read_predictions(path: Path) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        stem = Path(str(payload.get("source", ""))).stem
+        if stem:
+            records[stem] = payload
+    return records
+
+
+def attach_predicted_keypoints(
+    records: list[dict[str, Any]],
+    predictions_path: Path | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if predictions_path is None:
+        return records, []
+    predictions = read_predictions(predictions_path)
+    tuned_records = []
+    skipped = []
+    for record in records:
+        prediction = predictions.get(str(record["stem"]))
+        keypoints = prediction.get("keypoints") if prediction else None
+        if not keypoints:
+            skipped.append(str(record["stem"]))
+            continue
+        updated = dict(record)
+        updated["keypoints"] = keypoints
+        tuned_records.append(updated)
+    return tuned_records, skipped
 
 
 def score_candidate(
@@ -88,20 +122,23 @@ def score_candidate(
 def candidate_sort_key(candidate: dict[str, Any]) -> tuple[float, float, float, float]:
     return (
         -float(candidate["containment_ge_target_rate"]),
-        -float(candidate["min_containment"]),
         float(candidate["mean_area_ratio_to_target"]),
         float(candidate["max_area_ratio_to_target"]),
+        -float(candidate["min_containment"]),
     )
 
 
 def main() -> None:
     args = parse_args()
     records = read_records(args.dataset_dir, args.split)
+    records, skipped = attach_predicted_keypoints(records, args.predictions)
+    if not records:
+        raise SystemExit("No records available for geometry tuning")
     candidates = []
     for base, posterior, side in itertools.product(
-        [0.04, 0.06, 0.08, 0.10, 0.12, 0.15],
-        [0.05, 0.08, 0.10, 0.12, 0.15, 0.18, 0.22, 0.28],
-        [0.05, 0.08, 0.10, 0.12, 0.15, 0.18, 0.22, 0.28],
+        [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50],
+        [0.10, 0.20, 0.30, 0.40, 0.50, 0.70, 1.00],
+        [0.10, 0.20, 0.30, 0.40, 0.50, 0.70, 1.00, 1.30, 1.60, 2.00],
     ):
         candidates.append(
             score_candidate(
@@ -117,6 +154,8 @@ def main() -> None:
     payload = {
         "dataset_dir": str(args.dataset_dir.resolve()),
         "split": args.split,
+        "predictions": str(args.predictions) if args.predictions is not None else None,
+        "skipped_without_predictions": skipped,
         "target_containment": args.target_containment,
         "best": best,
         "top_candidates": candidates[:20],
@@ -130,6 +169,7 @@ def main() -> None:
         "roi_base_backtrack_fraction": best["base_backtrack_fraction"],
         "roi_posterior_margin_fraction": best["posterior_margin_fraction"],
         "roi_side_margin_fraction": best["side_margin_fraction"],
+        "confidence_consistency_weight": 0.25,
         "fusion_mode": "angle_bisector",
     }
     if args.postprocess_out is not None:

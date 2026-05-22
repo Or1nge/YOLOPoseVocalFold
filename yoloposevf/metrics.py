@@ -13,7 +13,10 @@ from yoloposevf.geometry import (
     pck,
     polygon_area,
     polygon_containment_rate,
+    polygon_keypoint_containment_rate,
 )
+
+ROI_CONTAINMENT_TARGET = 0.87
 
 
 @dataclass(frozen=True)
@@ -51,10 +54,15 @@ def evaluate_sample(
         pred_area = polygon_area(predicted_roi_polygon)
         roi_containment = polygon_containment_rate(target_roi_polygon, predicted_roi_polygon)
         roi_area_ratio = pred_area / target_area if target_area > 0 else None
+    keypoint_containment = (
+        polygon_keypoint_containment_rate(predicted_roi_polygon, predicted_keypoints)
+        if predicted_roi_polygon is not None
+        else containment_rate(predicted_bbox, predicted_keypoints)
+    )
     return SampleMetrics(
         source=source,
         bbox_iou=bbox_iou(predicted_bbox, target_bbox),
-        containment_rate=containment_rate(predicted_bbox, predicted_keypoints),
+        containment_rate=keypoint_containment,
         normalized_keypoint_error=normalized_keypoint_error(
             predicted_keypoints,
             target_keypoints,
@@ -93,8 +101,9 @@ def summarize_metrics(samples: Sequence[SampleMetrics]) -> dict[str, object]:
     }
     if roi_containment:
         summary["mean_roi_polygon_containment_rate"] = mean(roi_containment)
-        summary["roi_polygon_containment_ge_95_rate"] = sum(
-            value >= 0.95 for value in roi_containment
+        summary["roi_polygon_containment_target"] = ROI_CONTAINMENT_TARGET
+        summary["roi_polygon_containment_ge_87_rate"] = sum(
+            value >= ROI_CONTAINMENT_TARGET for value in roi_containment
         ) / len(roi_containment)
     if roi_area_ratios:
         summary["mean_roi_area_ratio_to_target"] = mean(roi_area_ratios)

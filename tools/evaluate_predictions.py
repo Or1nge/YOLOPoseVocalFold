@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 from PIL import Image
@@ -83,7 +84,9 @@ def main() -> None:
         if prediction is None:
             missing_predictions.append(label_path.stem)
             continue
-        if not prediction.get("final_bbox") or not prediction.get("keypoints"):
+        predicted_bbox = prediction.get("final_bbox_xyxy") or prediction.get("final_bbox")
+        predicted_box_polygon = prediction.get("final_box_polygon") or prediction.get("roi_polygon")
+        if not predicted_bbox or not prediction.get("keypoints"):
             invalid_predictions.append(label_path.stem)
             continue
         with Image.open(image_path) as image:
@@ -93,14 +96,14 @@ def main() -> None:
         samples.append(
             evaluate_sample(
                 source=label_path.stem,
-                predicted_bbox=prediction["final_bbox"],
+                predicted_bbox=predicted_bbox,
                 target_bbox=target.bbox_xyxy,
                 predicted_keypoints=prediction.get("keypoints", []),
                 target_keypoints=target.keypoints,
                 image_size=image_size,
                 action=str(prediction.get("action", "")),
                 final_confidence=float(prediction.get("final_confidence", 0.0)),
-                predicted_roi_polygon=prediction.get("roi_polygon"),
+                predicted_roi_polygon=predicted_box_polygon,
                 target_roi_polygon=roi_record.get("manual_roi_polygon"),
             )
         )
@@ -129,6 +132,13 @@ def main() -> None:
     summary = summarize_metrics(samples)
     summary["missing_predictions"] = missing_predictions
     summary["invalid_predictions"] = invalid_predictions
+    summary["all_prediction_actions"] = dict(Counter(str(item.get("action", "")) for item in predictions.values()))
+    summary["usable_prediction_count"] = sum(
+        1 for item in predictions.values() if item.get("usable_box_polygon") is not None or item.get("usable_bbox") is not None
+    )
+    summary["rejected_prediction_count"] = sum(
+        1 for item in predictions.values() if item.get("action") == "reject_or_relabel"
+    )
     summary_path = args.out_dir / f"{args.split}_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False))
