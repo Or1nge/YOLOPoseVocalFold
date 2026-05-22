@@ -169,6 +169,7 @@ def main() -> None:
     with torch.inference_mode():
         for images, indices, batch_errors in loader:
             images = images.to(device, non_blocking=True)
+            images = shared.gpu_normalise(images)
             logits = model(images)
             batch_probs = F.softmax(logits, dim=1).detach().cpu().numpy()
             idx_np = indices.detach().cpu().numpy()
