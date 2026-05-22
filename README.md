@@ -8,7 +8,7 @@ Anatomy-Constrained YOLO-Pose for Vocal Fold ROI Localization.
 image -> 3 anatomy keypoints -> angle-bisector rotated final_box_polygon + final_confidence
 ```
 
-主分支只做稳定 baseline：标准 YOLO-Pose 训练 + 关键点几何后处理。实验性 `keypoint-containment loss` 放在独立 Git 分支 `exp/keypoint-containment-loss`。
+主分支现在包含标准 YOLO-Pose 训练、关键点几何后处理、keypoint-containment loss 训练入口，以及 LDP pseudo 微调/裁剪流程。
 
 ## 目录
 
@@ -112,9 +112,9 @@ python tools/train_yolo_pose.py --config configs/train_baseline.yaml
 
 训练输出写入 `Results/glottic_three_point/`，并在每个 run 目录内记录 `run_metadata.json`，包含命令、配置和 Git 版本信息。
 
-## 实验：keypoint-containment loss
+## Keypoint-Containment Loss
 
-本分支在当前 3 点声门 ROI 流程上，额外加入训练期 containment loss：
+当前 3 点声门 ROI 流程可额外加入训练期 containment loss：
 
 ```text
 loss_total = loss_yolo_pose + lambda_containment * loss_containment
@@ -225,14 +225,11 @@ python tools/tune_geometry_roi.py \
   --postprocess-out Results/geometry_tuning/glottic_three_point/postprocess_tuned.yaml
 ```
 
-## Git 分支
+## Git 说明
 
 ```text
 main
-  标准 YOLO-Pose baseline + 几何融合后处理
-
-exp/keypoint-containment-loss
-  只测试 bbox 包含 keypoints 的训练约束，不改主分支后处理
+  三点 YOLO-Pose + 角平分线旋转 ROI + containment loss + LDP pseudo 微调流程
 ```
 
-分支比较应使用同一批数据、同一套 split、同一套增强策略和同一套评估脚本。
+旧的 `exp/keypoint-containment-loss` 实验分支已经合入 main；后续直接在 main 上维护。

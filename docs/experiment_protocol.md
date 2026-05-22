@@ -1,8 +1,8 @@
 # 实验协议
 
-## 主分支 baseline
+## 当前 main 流程
 
-主分支只包含标准 YOLO-Pose 训练和推理后处理：
+main 现在包含标准 YOLO-Pose 训练、推理后处理、keypoint-containment loss 训练入口，以及 LDP pseudo 微调流程：
 
 1. LabelMe 转 YOLO-Pose 标签。
 2. 标准 YOLO-Pose 训练。
@@ -10,27 +10,22 @@
 4. 以前联合为顶点，连接左右后方中点并取夹角角平分线。
 5. 沿角平分线反方向回退一小段到 A 点，以垂直于角平分线的线段为底，生成旋转 ROI。
 6. 输出 `final_box_polygon` 作为最终四点旋转框：一条边平行于角平分线，左右宽度按两侧后方点到角平分线的投影分别扩张；`final_bbox_xyxy` / `final_bbox` 只作为传统 bbox 评估的外接矩形兼容字段。
-7. 计算 `final_confidence` 并输出 `auto_accept / manual_review / reject_or_relabel`；低置信度样本保留置信度和原因，但 `usable_box_polygon` 置空，不作为自动 ROI。当前配置会用 `confidence_gamma` 拉开中低置信度差异，并用 ROI 面积、关键点是否越出图像边界等 gate 降低明显非声带区域的自动可用风险。
+7. 计算 `final_confidence` 并输出 `auto_accept / manual_review / reject_or_relabel`；低置信度样本保留置信度和原因，但 `usable_box_polygon` 置空，不作为自动 ROI。当前配置会用 `confidence_curve=tanh` 拉开中低置信度差异，并用 ROI 面积、关键点是否越出图像边界等 gate 降低明显非声带区域的自动可用风险。
 
-主分支不改 YOLO loss，方便建立可解释 baseline。
-
-## 分支实验
-
-`exp/keypoint-containment-loss` 只测试 containment loss：
+## Keypoint-Containment Loss
 
 ```text
 loss_total = loss_yolo_pose + lambda * loss_containment
 ```
 
-本分支已同步 main 的 3 点角平分线流程，并固定使用 87% 几何调参结果。训练期 containment 项只约束 decoded predicted bbox 与 decoded predicted keypoints：3 个点由模型预测，训练时不会作为图像输入。
+训练期 containment 项只约束 decoded predicted bbox 与 decoded predicted keypoints：3 个点由模型预测，训练时不会作为图像输入。实验比较时应固定同一套 87% 后处理参数，否则无法判断收益来自 loss 还是来自规则变化。
 
-分支比较时应固定同一套 87% 后处理参数，否则无法判断收益来自 loss 还是来自规则变化。
-
-### 当前实验实现
+### 当前实现
 
 - 可复用 loss：`yoloposevf/containment_loss.py`
 - 实验入口：`tools/train_keypoint_containment.py`
 - lambda sweep：`configs/train_containment_lambda_sweep.yaml`
+- LDP pseudo 微调：`configs/train_containment_ldp_pseudo_mixedpenalty_copy_y11m.yaml`
 - 本地可验证命令：
 
 ```bash
