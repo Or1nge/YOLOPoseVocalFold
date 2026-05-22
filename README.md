@@ -161,11 +161,17 @@ python tools/train_keypoint_containment.py \
 
 ## 推理
 
+当前推荐模型短名为 `vf_roi_v1`：
+
+```text
+Results/models/vf_roi_v1/best.pt
+```
+
 ```bash
 python tools/predict_roi.py \
-  --weights Results/glottic_three_point/yolo_pose_glottic_three_point/weights/best.pt \
+  --weights Results/models/vf_roi_v1/best.pt \
   --source data/yolo_pose/images/val \
-  --postprocess-config Results/geometry_tuning/glottic_three_point/postprocess_tuned.yaml \
+  --postprocess-config Results/models/vf_roi_v1/postprocess.yaml \
   --out Results/predictions/val_predictions.jsonl
 ```
 

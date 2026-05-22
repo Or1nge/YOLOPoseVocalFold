@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added the short `vf_roi_v1` alias for the current recommended LDP-pseudo containment ROI model.
 - Merged the former `exp/keypoint-containment-loss` workflow into `main`; future containment-loss and LDP pseudo fine-tuning work should continue on `main`.
 - Added configurable confidence sharpening via `confidence_gamma` for postprocessed ROI decisions.
 - Added a configurable `tanh` confidence curve for postprocessed ROI decisions while keeping the previous power/gamma curve available.
