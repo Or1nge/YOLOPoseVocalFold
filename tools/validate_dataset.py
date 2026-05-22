@@ -42,13 +42,24 @@ def validate_dataset(dataset_dir: Path) -> dict[str, object]:
     for split in ("train", "val", "test"):
         labels_dir = dataset_dir / "labels" / split
         images_dir = dataset_dir / "images" / split
+        image_stems = {
+            image_path.stem
+            for image_path in images_dir.iterdir()
+            if image_path.is_file() and image_path.suffix.lower() in IMAGE_EXTENSIONS
+        }
+        label_stems = set()
+        counts[f"{split}_images"] += len(image_stems)
         for label_path in sorted(labels_dir.glob("*.txt")):
+            label_stems.add(label_path.stem)
             counts[f"{split}_labels"] += 1
             image_path = find_image(images_dir, label_path.stem)
             if image_path is None:
                 issues.append({"split": split, "label": str(label_path), "issue": "missing_image"})
                 continue
             try:
+                if not label_path.read_text(encoding="utf-8").strip():
+                    counts[f"{split}_negative_labels"] += 1
+                    continue
                 with Image.open(image_path) as image:
                     image_size = ImageSize(image.width, image.height)
                 label = read_yolo_pose_label(label_path, image_size)
@@ -63,6 +74,8 @@ def validate_dataset(dataset_dir: Path) -> dict[str, object]:
                         issues.append({"split": split, "label": str(label_path), "issue": f"kp{index}_bad_visibility"})
             except Exception as exc:
                 issues.append({"split": split, "label": str(label_path), "issue": "parse_error", "detail": str(exc)})
+        for stem in sorted(image_stems - label_stems):
+            issues.append({"split": split, "image": str(images_dir / stem), "issue": "missing_label"})
 
     return {
         "dataset_dir": str(dataset_dir.resolve()),

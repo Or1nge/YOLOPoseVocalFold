@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 from PIL import Image
@@ -50,9 +51,25 @@ def find_image(images_dir: Path, stem: str) -> Path | None:
     return None
 
 
+def read_roi_metadata(dataset_dir: Path, split: str) -> dict[str, dict[str, object]]:
+    path = dataset_dir / "roi_polygons" / f"{split}.jsonl"
+    if not path.exists():
+        return {}
+    records: dict[str, dict[str, object]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        stem = str(payload.get("stem", ""))
+        if stem:
+            records[stem] = payload
+    return records
+
+
 def main() -> None:
     args = parse_args()
     predictions = read_predictions(args.predictions)
+    roi_metadata = read_roi_metadata(args.dataset_dir, args.split)
     labels_dir = args.dataset_dir / "labels" / args.split
     images_dir = args.dataset_dir / "images" / args.split
 
@@ -67,22 +84,27 @@ def main() -> None:
         if prediction is None:
             missing_predictions.append(label_path.stem)
             continue
-        if not prediction.get("final_bbox") or not prediction.get("keypoints"):
+        predicted_bbox = prediction.get("final_bbox_xyxy") or prediction.get("final_bbox")
+        predicted_box_polygon = prediction.get("final_box_polygon") or prediction.get("roi_polygon")
+        if not predicted_bbox or not prediction.get("keypoints"):
             invalid_predictions.append(label_path.stem)
             continue
         with Image.open(image_path) as image:
             image_size = ImageSize(image.width, image.height)
         target = read_yolo_pose_label(label_path, image_size)
+        roi_record = roi_metadata.get(label_path.stem, {})
         samples.append(
             evaluate_sample(
                 source=label_path.stem,
-                predicted_bbox=prediction["final_bbox"],
+                predicted_bbox=predicted_bbox,
                 target_bbox=target.bbox_xyxy,
                 predicted_keypoints=prediction.get("keypoints", []),
                 target_keypoints=target.keypoints,
                 image_size=image_size,
                 action=str(prediction.get("action", "")),
                 final_confidence=float(prediction.get("final_confidence", 0.0)),
+                predicted_roi_polygon=predicted_box_polygon,
+                target_roi_polygon=roi_record.get("manual_roi_polygon"),
             )
         )
 
@@ -99,6 +121,8 @@ def main() -> None:
                 "pck",
                 "action",
                 "final_confidence",
+                "roi_polygon_containment_rate",
+                "roi_area_ratio_to_target",
             ],
         )
         writer.writeheader()
@@ -108,6 +132,13 @@ def main() -> None:
     summary = summarize_metrics(samples)
     summary["missing_predictions"] = missing_predictions
     summary["invalid_predictions"] = invalid_predictions
+    summary["all_prediction_actions"] = dict(Counter(str(item.get("action", "")) for item in predictions.values()))
+    summary["usable_prediction_count"] = sum(
+        1 for item in predictions.values() if item.get("usable_box_polygon") is not None or item.get("usable_bbox") is not None
+    )
+    summary["rejected_prediction_count"] = sum(
+        1 for item in predictions.values() if item.get("action") == "reject_or_relabel"
+    )
     summary_path = args.out_dir / f"{args.split}_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False))

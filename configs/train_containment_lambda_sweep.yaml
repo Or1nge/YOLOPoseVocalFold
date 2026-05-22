@@ -2,6 +2,7 @@ base:
   model: yolo11n-pose.pt
   data: data/yolo_pose/vocal_fold_pose.yaml
   project: Results/containment_loss
+  name: yolo_pose_glottic_three_point_roi87_containment
   imgsz: 640
   epochs: 150
   batch: 8
@@ -11,7 +12,21 @@ base:
   seed: 42
   exist_ok: false
 
-# This experiment changes training loss only. Keep postprocess.yaml unchanged.
+  # Keep the containment-loss comparison aligned with main's small-data recipe.
+  degrees: 8.0
+  translate: 0.08
+  scale: 0.20
+  shear: 0.0
+  perspective: 0.0
+  fliplr: 0.0
+  flipud: 0.0
+  hsv_h: 0.01
+  hsv_s: 0.25
+  hsv_v: 0.25
+  close_mosaic: 10
+
+# This branch keeps the current 3-keypoint angle-bisector postprocessing and
+# adds a training-time containment term for predicted bbox vs predicted keypoints.
 containment_loss:
   margin: 0.0
   normalize_by_box_size: true

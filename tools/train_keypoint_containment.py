@@ -5,7 +5,6 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from types import MethodType
 from typing import Any
 
 import yaml
@@ -17,6 +16,13 @@ if str(PROJECT_ROOT) not in sys.path:
 from yoloposevf.containment_loss import containment_penalty_numpy  # noqa: E402
 from yoloposevf.run_archive import write_run_metadata  # noqa: E402
 
+try:
+    from ultralytics.models.yolo.pose import PoseTrainer as _UltralyticsPoseTrainer
+    from ultralytics.utils.loss import v8PoseLoss as _UltralyticsPoseLoss
+except ImportError:
+    _UltralyticsPoseTrainer = None
+    _UltralyticsPoseLoss = object
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -27,7 +33,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data", type=Path, help="Override dataset YAML path.")
     parser.add_argument("--model", type=str, help="Override YOLO pose checkpoint.")
     parser.add_argument("--name", type=str, help="Override run name.")
+    parser.add_argument("--project", type=Path, help="Override output project directory.")
     parser.add_argument("--device", type=str, help="Override device, e.g. 0 or cpu.")
+    parser.add_argument("--epochs", type=int, help="Override epoch count.")
+    parser.add_argument("--batch", type=int, help="Override batch size.")
+    parser.add_argument("--workers", type=int, help="Override dataloader workers.")
+    parser.add_argument("--imgsz", type=int, help="Override image size.")
+    parser.add_argument("--patience", type=int, help="Override early stopping patience.")
+    parser.add_argument("--exist-ok", action="store_true", help="Allow writing into an existing run folder.")
     parser.add_argument("--dry-run", action="store_true", help="Print effective run configs.")
     parser.add_argument("--smoke-loss", action="store_true", help="Run a synthetic containment-loss check.")
     parser.add_argument(
@@ -55,8 +68,16 @@ def build_run_configs(args: argparse.Namespace) -> list[dict[str, Any]]:
         base["data"] = str(args.data)
     if args.model is not None:
         base["model"] = args.model
+    if args.project is not None:
+        base["project"] = str(args.project)
     if args.device is not None:
         base["device"] = args.device
+    for key in ("epochs", "batch", "workers", "imgsz", "patience"):
+        value = getattr(args, key)
+        if value is not None:
+            base[key] = value
+    if args.exist_ok:
+        base["exist_ok"] = True
 
     base.setdefault("model", "yolo11n-pose.pt")
     base.setdefault("data", "data/yolo_pose/vocal_fold_pose.yaml")
@@ -78,7 +99,8 @@ def build_run_configs(args: argparse.Namespace) -> list[dict[str, Any]]:
             "normalize_by_box_size": bool(loss_cfg.get("normalize_by_box_size", True)),
             "reduction": str(loss_cfg.get("reduction", "mean")),
         }
-        cfg["name"] = args.name or f"containment_lambda_{float(lambda_value):g}".replace(".", "p")
+        default_name = f"containment_lambda_{float(lambda_value):g}".replace(".", "p")
+        cfg["name"] = args.name or str(base.get("name", default_name))
         run_configs.append(cfg)
     return run_configs
 
@@ -86,119 +108,129 @@ def build_run_configs(args: argparse.Namespace) -> list[dict[str, Any]]:
 def synthetic_loss_smoke() -> dict[str, float]:
     boxes = [[0.0, 0.0, 10.0, 10.0], [0.0, 0.0, 10.0, 10.0]]
     keypoints = [
-        [[1.0, 1.0], [5.0, 5.0], [9.0, 9.0], [10.0, 10.0]],
-        [[-2.0, 5.0], [5.0, 12.0], [15.0, 5.0], [5.0, -3.0]],
+        [[1.0, 1.0], [5.0, 5.0], [9.0, 9.0]],
+        [[-2.0, 5.0], [5.0, 12.0], [15.0, 5.0]],
     ]
     per_sample = containment_penalty_numpy(boxes, keypoints, reduction="none")
     return {"inside_sample_loss": float(per_sample[0]), "outside_sample_loss": float(per_sample[1])}
 
 
-def build_experimental_trainer(lambda_containment: float, containment_cfg: dict[str, Any]):
-    try:
-        from ultralytics.models.yolo.pose import PoseTrainer
-        from ultralytics.utils.loss import v8PoseLoss
-    except ImportError as exc:
-        raise SystemExit("ultralytics is not installed; use --dry-run or --smoke-loss on this host.") from exc
+class ContainmentPoseLoss(_UltralyticsPoseLoss):
+    """YOLO-Pose loss with an added predicted-bbox/keypoint containment term."""
 
-    class ContainmentPoseLoss(v8PoseLoss):
-        """YOLO-Pose loss with an added predicted-bbox/keypoint containment term.
+    lambda_containment: float = 0.0
+    containment_cfg: dict[str, Any] = {}
 
-        This follows the Ultralytics 8.4.x `v8PoseLoss` tensor flow: decoded
-        predicted boxes and decoded predicted keypoints are both in anchor-grid
-        coordinates, so the containment term can be added without changing
-        preprocessing, assignment, or postprocessing.
-        """
+    def __init__(self, model, tal_topk: int = 10, tal_topk2: int = 10):  # type: ignore[no-untyped-def]
+        super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
+        self.lambda_containment = float(self.__class__.lambda_containment)
+        self.containment_cfg = dict(self.__class__.containment_cfg)
+        self.last_containment_loss = None
 
-        def __init__(self, model, tal_topk: int = 10, tal_topk2: int = 10):  # type: ignore[no-untyped-def]
-            super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
-            self.lambda_containment = float(lambda_containment)
-            self.containment_cfg = containment_cfg
-            self.last_containment_loss = None
+    def loss(self, preds, batch):  # type: ignore[no-untyped-def]
+        import torch
 
-        def loss(self, preds, batch):  # type: ignore[no-untyped-def]
-            import torch
+        from yoloposevf.containment_loss import containment_penalty_torch
 
-            from yoloposevf.containment_loss import containment_penalty_torch
+        pred_kpts_raw = preds["kpts"].permute(0, 2, 1).contiguous()
+        pred_distri = preds["boxes"].permute(0, 2, 1).contiguous()
+        loss = torch.zeros(5, device=self.device)  # box, kpt_location, kpt_visibility, cls, dfl
+        (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor), det_loss, _ = (
+            self.get_assigned_targets_and_loss(preds, batch)
+        )
+        loss[0], loss[3], loss[4] = det_loss[0], det_loss[1], det_loss[2]
 
-            pred_kpts_raw = preds["kpts"].permute(0, 2, 1).contiguous()
-            pred_distri = preds["boxes"].permute(0, 2, 1).contiguous()
-            loss = torch.zeros(5, device=self.device)  # box, kpt_location, kpt_visibility, cls, dfl
-            (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor), det_loss, _ = (
-                self.get_assigned_targets_and_loss(preds, batch)
+        batch_size = pred_kpts_raw.shape[0]
+        imgsz = torch.tensor(
+            preds["feats"][0].shape[2:],
+            device=self.device,
+            dtype=pred_kpts_raw.dtype,
+        ) * self.stride[0]
+
+        pred_kpts = self.kpts_decode(anchor_points, pred_kpts_raw.view(batch_size, -1, *self.kpt_shape))
+        containment_loss = torch.zeros((), device=self.device, dtype=pred_kpts.dtype)
+
+        if fg_mask.sum():
+            keypoints = batch["keypoints"].to(self.device).float().clone()
+            keypoints[..., 0] *= imgsz[1]
+            keypoints[..., 1] *= imgsz[0]
+
+            loss[1], loss[2] = self.calculate_keypoints_loss(
+                fg_mask,
+                target_gt_idx,
+                keypoints,
+                batch["batch_idx"].view(-1, 1),
+                stride_tensor,
+                target_bboxes,
+                pred_kpts,
             )
-            loss[0], loss[3], loss[4] = det_loss[0], det_loss[1], det_loss[2]
 
-            batch_size = pred_kpts_raw.shape[0]
-            imgsz = torch.tensor(
-                preds["feats"][0].shape[2:],
-                device=self.device,
-                dtype=pred_kpts_raw.dtype,
-            ) * self.stride[0]
-
-            pred_kpts = self.kpts_decode(anchor_points, pred_kpts_raw.view(batch_size, -1, *self.kpt_shape))
-            containment_loss = torch.zeros((), device=self.device, dtype=pred_kpts.dtype)
-
-            if fg_mask.sum():
-                keypoints = batch["keypoints"].to(self.device).float().clone()
-                keypoints[..., 0] *= imgsz[1]
-                keypoints[..., 1] *= imgsz[0]
-
-                loss[1], loss[2] = self.calculate_keypoints_loss(
-                    fg_mask,
-                    target_gt_idx,
+            if self.lambda_containment > 0:
+                pred_bboxes = self.bbox_decode(anchor_points, pred_distri)
+                selected_keypoints = self._select_target_keypoints(
                     keypoints,
                     batch["batch_idx"].view(-1, 1),
-                    stride_tensor,
-                    target_bboxes,
-                    pred_kpts,
+                    target_gt_idx,
+                    fg_mask,
+                )
+                selected_keypoints[..., :2] /= stride_tensor.view(1, -1, 1, 1)
+                visibility = (
+                    selected_keypoints[fg_mask][..., 2] != 0
+                    if selected_keypoints.shape[-1] == 3
+                    else None
+                )
+                containment_loss = containment_penalty_torch(
+                    pred_bboxes[fg_mask],
+                    pred_kpts[fg_mask][..., :2],
+                    visibility=visibility,
+                    margin=float(self.containment_cfg.get("margin", 0.0)),
+                    reduction=str(self.containment_cfg.get("reduction", "mean")),
+                    normalize_by_box_size=bool(self.containment_cfg.get("normalize_by_box_size", True)),
                 )
 
-                if self.lambda_containment > 0:
-                    pred_bboxes = self.bbox_decode(anchor_points, pred_distri)
-                    selected_keypoints = self._select_target_keypoints(
-                        keypoints,
-                        batch["batch_idx"].view(-1, 1),
-                        target_gt_idx,
-                        fg_mask,
-                    )
-                    selected_keypoints[..., :2] /= stride_tensor.view(1, -1, 1, 1)
-                    visibility = (
-                        selected_keypoints[fg_mask][..., 2] != 0
-                        if selected_keypoints.shape[-1] == 3
-                        else None
-                    )
-                    containment_loss = containment_penalty_torch(
-                        pred_bboxes[fg_mask],
-                        pred_kpts[fg_mask][..., :2],
-                        visibility=visibility,
-                        margin=float(self.containment_cfg.get("margin", 0.0)),
-                        reduction=str(self.containment_cfg.get("reduction", "mean")),
-                        normalize_by_box_size=bool(self.containment_cfg.get("normalize_by_box_size", True)),
-                    )
+        loss[1] *= self.hyp.pose
+        loss[2] *= self.hyp.kobj
+        loss[1] += self.lambda_containment * containment_loss
+        self.last_containment_loss = containment_loss.detach()
+        return loss * batch_size, loss.detach()
 
-            loss[1] *= self.hyp.pose
-            loss[2] *= self.hyp.kobj
-            loss[1] += self.lambda_containment * containment_loss
-            self.last_containment_loss = containment_loss.detach()
-            return loss * batch_size, loss.detach()
 
-    class ContainmentPoseTrainer(PoseTrainer):
-        """PoseTrainer subclass that installs the containment-loss criterion."""
+def init_containment_criterion(pose_model):  # type: ignore[no-untyped-def]
+    return ContainmentPoseLoss(pose_model)
 
-        containment_lambda = lambda_containment
-        containment_loss_config = containment_cfg
 
-        def get_model(self, cfg=None, weights=None, verbose=True):  # type: ignore[no-untyped-def]
-            model = super().get_model(cfg=cfg, weights=weights, verbose=verbose)
-            model.containment_lambda = self.containment_lambda
-            model.containment_loss_config = self.containment_loss_config
+_BaseContainmentPoseTrainer = _UltralyticsPoseTrainer if _UltralyticsPoseTrainer is not None else object
 
-            def init_criterion(pose_model):  # type: ignore[no-untyped-def]
-                return ContainmentPoseLoss(pose_model)
 
-            model.init_criterion = MethodType(init_criterion, model)
-            return model
+class ContainmentPoseTrainer(_BaseContainmentPoseTrainer):
+    """PoseTrainer subclass that installs the containment-loss criterion."""
 
+    containment_lambda: float = 0.0
+    containment_loss_config: dict[str, Any] = {}
+
+    def get_model(self, cfg=None, weights=None, verbose=True):  # type: ignore[no-untyped-def]
+        model = super().get_model(cfg=cfg, weights=weights, verbose=verbose)
+        model.containment_lambda = self.containment_lambda
+        model.containment_loss_config = self.containment_loss_config
+        model.__class__.init_criterion = init_containment_criterion
+        return model
+
+    def save_model(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        criterion = getattr(self.model, "criterion", None)
+        self.model.criterion = None
+        try:
+            return super().save_model(*args, **kwargs)
+        finally:
+            self.model.criterion = criterion
+
+
+def build_experimental_trainer(lambda_containment: float, containment_cfg: dict[str, Any]):
+    if _UltralyticsPoseTrainer is None:
+        raise SystemExit("ultralytics is not installed; use --dry-run or --smoke-loss on this host.")
+    ContainmentPoseLoss.lambda_containment = float(lambda_containment)
+    ContainmentPoseLoss.containment_cfg = dict(containment_cfg)
+    ContainmentPoseTrainer.containment_lambda = float(lambda_containment)
+    ContainmentPoseTrainer.containment_loss_config = dict(containment_cfg)
     return ContainmentPoseTrainer
 
 

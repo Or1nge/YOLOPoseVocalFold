@@ -32,8 +32,10 @@ def read_yolo_pose_label(label_path: Path, image_size: ImageSize) -> YoloPoseLab
     if len(lines) != 1:
         raise ValueError(f"{label_path} must contain exactly one ROI object, found {len(lines)}")
     parts = lines[0].split()
-    if len(parts) != 17:
-        raise ValueError(f"{label_path} must have 17 values: class bbox and 4 keypoints")
+    if len(parts) < 8 or (len(parts) - 5) % 3 != 0:
+        raise ValueError(
+            f"{label_path} must have class bbox plus N keypoints: got {len(parts)} values"
+        )
     values = [float(part) for part in parts]
     class_id = int(values[0])
     bbox_xyxy = yolo_to_xyxy(values[1], values[2], values[3], values[4], image_size)
@@ -47,4 +49,3 @@ def read_yolo_pose_label(label_path: Path, image_size: ImageSize) -> YoloPoseLab
             )
         )
     return YoloPoseLabel(class_id=class_id, bbox_xyxy=bbox_xyxy, keypoints=tuple(keypoints), image_size=image_size)
-

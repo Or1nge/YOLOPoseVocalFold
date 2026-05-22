@@ -1,12 +1,10 @@
-bbox_label: vocal_fold_roi
+bbox_label: 声门区域
 point_labels:
-  - kp1
-  - kp2
-  - kp3
-  - kp4
+  - 前联合
+  - 左后方中点
+  - 右后方中点
 class_id: 0
-class_name: vocal_fold_roi
+class_name: glottic_roi
 visibility: 2
-correction_margin_x: 0.18
-correction_margin_y: 0.18
-
+correction_margin_x: 0.04
+correction_margin_y: 0.04
