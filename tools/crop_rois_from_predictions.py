@@ -55,6 +55,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Copy the original image when a requested crop cannot be produced.",
     )
+    parser.add_argument(
+        "--copy-original-source",
+        choices=["source", "original_source"],
+        default="source",
+        help="Which record path to use when retaining/falling back to an original image.",
+    )
+    parser.add_argument(
+        "--output-size",
+        type=int,
+        default=0,
+        help="If >0, stretch every saved output to this square size in pixels.",
+    )
     parser.add_argument("--crop-mode", choices=["polygon", "bbox"], default="polygon")
     parser.add_argument("--jpeg-quality", type=int, default=95)
     return parser.parse_args()
@@ -137,6 +149,13 @@ def crop_prediction(image_path: Path, record: dict[str, Any], mode: str) -> Imag
     return image.crop(clamped)
 
 
+def square_resize(image: Image.Image, output_size: int) -> Image.Image:
+    if output_size <= 0:
+        return image
+    resample = Image.Resampling.BILINEAR if hasattr(Image, "Resampling") else Image.BILINEAR
+    return image.convert("RGB").resize((output_size, output_size), resample=resample)
+
+
 def save_image(image: Image.Image, path: Path, quality: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     suffix = path.suffix.lower()
@@ -146,11 +165,23 @@ def save_image(image: Image.Image, path: Path, quality: int) -> None:
         image.save(path)
 
 
-def copy_original_image(source: Path, destination: Path) -> None:
+def save_original_image(source: Path, destination: Path, *, output_size: int, quality: int) -> None:
     import shutil
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
+    if output_size <= 0:
+        shutil.copy2(source, destination)
+        return
+    image = Image.open(source).convert("RGB")
+    save_image(square_resize(image, output_size), destination, quality)
+
+
+def original_source_for_record(record: dict[str, Any], source: Path, mode: str) -> Path:
+    if mode == "original_source":
+        original = record.get("original_source")
+        if original:
+            return Path(str(original))
+    return source
 
 
 def class_from_relative(rel_path: Path, allowed_classes: set[str]) -> str | None:
@@ -199,6 +230,7 @@ def main() -> None:
         out_path = args.out_dir / out_rel
         cropped = False
         copied_original = False
+        original_output_source = ""
         error = ""
         if action in crop_actions:
             try:
@@ -207,6 +239,7 @@ def main() -> None:
                     failures["empty_crop"] += 1
                     error = "empty_crop"
                 else:
+                    crop = square_resize(crop, args.output_size)
                     save_image(crop, out_path, args.jpeg_quality)
                     cropped = True
                     counts[class_name]["cropped"] += 1
@@ -214,13 +247,25 @@ def main() -> None:
                 failures["crop_error"] += 1
                 error = f"{type(exc).__name__}: {exc}"
             if (not cropped) and args.fallback_original_on_crop_failure:
-                copy_original_image(source, out_path)
+                original = original_source_for_record(record, source, args.copy_original_source)
+                original_output_source = str(original)
+                if original.exists():
+                    save_original_image(original, out_path, output_size=args.output_size, quality=args.jpeg_quality)
+                    copied_original = True
+                    counts[class_name]["copied_original"] += 1
+                else:
+                    failures["missing_original_source"] += 1
+                    error = "missing_original_source" if not error else f"{error};missing_original_source"
+        elif action in copy_original_actions and (not copy_original_classes or class_name in copy_original_classes):
+            original = original_source_for_record(record, source, args.copy_original_source)
+            original_output_source = str(original)
+            if original.exists():
+                save_original_image(original, out_path, output_size=args.output_size, quality=args.jpeg_quality)
                 copied_original = True
                 counts[class_name]["copied_original"] += 1
-        elif action in copy_original_actions and (not copy_original_classes or class_name in copy_original_classes):
-            copy_original_image(source, out_path)
-            copied_original = True
-            counts[class_name]["copied_original"] += 1
+            else:
+                failures["missing_original_source"] += 1
+                error = "missing_original_source"
 
         rows.append(
             {
@@ -230,6 +275,7 @@ def main() -> None:
                 "action": action,
                 "cropped": cropped,
                 "copied_original": copied_original,
+                "original_output_source": original_output_source,
                 "crop_path": str(out_path) if cropped else "",
                 "output_path": str(out_path) if cropped or copied_original else "",
                 "final_confidence": record.get("final_confidence", ""),
@@ -252,6 +298,7 @@ def main() -> None:
             "action",
             "cropped",
             "copied_original",
+            "original_output_source",
             "crop_path",
             "output_path",
             "final_confidence",
@@ -276,6 +323,8 @@ def main() -> None:
         "copy_original_actions": sorted(copy_original_actions),
         "copy_original_classes": sorted(copy_original_classes),
         "fallback_original_on_crop_failure": bool(args.fallback_original_on_crop_failure),
+        "copy_original_source": args.copy_original_source,
+        "output_size": args.output_size,
         "crop_mode": args.crop_mode,
         "total_records": len(rows),
         "counts_by_class": {class_name: dict(counts[class_name]) for class_name in args.classes},

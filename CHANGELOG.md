@@ -5,6 +5,7 @@
 - Promoted ROI localization to `V1.1`: `tools/predict_roi.py` now applies black-border pre-enhancement to every input image by default before YOLO-Pose inference and postprocessing.
 - Changed directory/list ROI prediction to stream one image at a time so full LDP inference does not batch thousands of paths into GPU memory.
 - Added `--copy-original-classes` to ROI crop export, allowing rules such as cropping accepted/review images while keeping only `混杂图片` rejects as originals and skipping other rejects.
+- Added square-output ROI crop export with `--output-size` and `--copy-original-source original_source`, so classifier datasets can use cropped boxes when present and unpadded originals when no box is found.
 - Fixed external 4-class checkpoint evaluation to apply the same ImageNet normalization used by the training/test evaluation path.
 - Added the short `vf_roi_v1` alias for the current recommended LDP-pseudo containment ROI model.
 - Added `--copy-original-actions` and `--fallback-original-on-crop-failure` to ROI crop export so rejected predictions can be retained as original images for downstream classification datasets.

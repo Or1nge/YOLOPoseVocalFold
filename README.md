@@ -251,6 +251,21 @@ python tools/crop_rois_from_predictions.py \
   --crop-mode polygon
 ```
 
+如果分类模型需要统一看到正方形输入，可把所有 action 都尝试按预测框裁剪，并把裁剪图或无框 fallback
+原图拉伸到固定正方形。V1.1 黑边图只用于 ROI 定位；fallback 用 `original_source` 回到未加黑边的原图：
+
+```bash
+python tools/crop_rois_from_predictions.py \
+  --predictions Results/predictions/ldp_8class_predictions.jsonl \
+  --source-root Results/predictions/ldp_8class_blackpad_inputs \
+  --out-dir Results/predictions/ldp_8class_square224_box_or_original \
+  --crop-actions auto_accept manual_review reject_or_relabel \
+  --fallback-original-on-crop-failure \
+  --copy-original-source original_source \
+  --output-size 224 \
+  --crop-mode polygon
+```
+
 训练完 4-class 分类模型后，可用下列工具在外部文件夹数据集上评估单个 checkpoint：
 
 ```bash
