@@ -374,12 +374,8 @@ def main() -> None:
                 result_iter.append((str(image_path), prediction, vote_count))
         else:
             result_iter = [
-                (
-                    str(getattr(result, "path", "")),
-                    result_to_prediction(result, source=str(getattr(result, "path", ""))),
-                    1,
-                )
-                for result in model.predict(**predict_kwargs)
+                (str(image_path), result_to_prediction(result, source=str(image_path)), 1)
+                for image_path, result in zip(images, model.predict(**predict_kwargs), strict=False)
             ]
 
         for source, prediction, vote_count in result_iter:
