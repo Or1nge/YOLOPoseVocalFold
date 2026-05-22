@@ -15,6 +15,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from yoloposevf.geometry import ImageSize
 from yoloposevf.postprocess import PosePrediction, PostprocessConfig, decide_action, fuse_prediction, load_postprocess_config
+from yoloposevf.preprocess import IMAGE_EXTENSIONS, blackpad_image_file
+
+
+ALGORITHM_VERSION = "V1.1"
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,6 +33,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tta", action="store_true", help="Use rotation/scale test-time augmentation without flips.")
     parser.add_argument("--tta-degrees", default="-6,0,6", help="Comma-separated rotation degrees for --tta.")
     parser.add_argument("--tta-scales", default="0.95,1.0,1.05", help="Comma-separated scale factors for --tta.")
+    parser.add_argument("--no-blackpad", action="store_true", help="Disable the V1.1 black-border pre-enhancement.")
+    parser.add_argument("--blackpad-fraction", type=float, default=0.30)
+    parser.add_argument("--blackpad-min-padding", type=int, default=80)
+    parser.add_argument("--blackpad-input-dir", type=Path, help="Directory for generated black-padded inference inputs.")
     return parser.parse_args()
 
 
@@ -43,10 +51,59 @@ def parse_float_list(value: str) -> list[float]:
 
 
 def iter_images(source: Path) -> list[Path]:
-    image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
     if source.is_file():
         return [source]
-    return sorted(path for path in source.rglob("*") if path.suffix.lower() in image_extensions)
+    return sorted(path for path in source.rglob("*") if path.suffix.lower() in IMAGE_EXTENSIONS)
+
+
+def default_blackpad_input_dir(out_path: Path) -> Path:
+    return out_path.parent / f"{out_path.stem}_blackpad_inputs"
+
+
+def relative_image_path(image_path: Path, source: Path) -> Path:
+    if source.is_file():
+        return Path(image_path.name)
+    return image_path.relative_to(source)
+
+
+def prepare_inference_images(
+    source: Path,
+    *,
+    out_path: Path,
+    blackpad_enabled: bool,
+    blackpad_input_dir: Path | None,
+    blackpad_fraction: float,
+    blackpad_min_padding: int,
+) -> tuple[list[Path], dict[str, dict[str, Any]]]:
+    images = iter_images(source)
+    metadata: dict[str, dict[str, Any]] = {}
+    if not blackpad_enabled:
+        for image_path in images:
+            metadata[str(image_path.resolve())] = {
+                "source": str(image_path),
+                "original_source": str(image_path),
+                "preprocess": {"type": "none"},
+            }
+        return images, metadata
+
+    pad_root = blackpad_input_dir or default_blackpad_input_dir(out_path)
+    padded_images: list[Path] = []
+    for image_path in images:
+        rel = relative_image_path(image_path, source)
+        destination = pad_root / rel
+        info = blackpad_image_file(
+            image_path,
+            destination,
+            fraction=blackpad_fraction,
+            min_padding=blackpad_min_padding,
+        )
+        padded_images.append(destination)
+        metadata[str(destination.resolve())] = {
+            "source": str(destination),
+            "original_source": str(image_path),
+            "preprocess": info.to_dict(),
+        }
+    return padded_images, metadata
 
 
 def result_to_prediction(
@@ -255,6 +312,19 @@ def predict_with_tta(
     return aggregate_predictions(predictions, image_path), len(predictions)
 
 
+def metadata_for_source(metadata: dict[str, dict[str, Any]], source: str | Path) -> dict[str, Any]:
+    path = Path(str(source))
+    return metadata.get(str(path.resolve()), {"source": str(source), "original_source": str(source), "preprocess": {"type": "none"}})
+
+
+def attach_prediction_metadata(record: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    record["algorithm_version"] = ALGORITHM_VERSION
+    record["source"] = metadata["source"]
+    record["original_source"] = metadata["original_source"]
+    record["preprocess"] = metadata["preprocess"]
+    return record
+
+
 def main() -> None:
     args = parse_args()
     try:
@@ -264,7 +334,22 @@ def main() -> None:
 
     cfg = load_postprocess_config(load_yaml(args.postprocess_config))
     model = YOLO(str(args.weights))
-    predict_kwargs: dict[str, Any] = {"source": str(args.source), "conf": args.conf, "stream": True}
+    images, source_metadata = prepare_inference_images(
+        args.source,
+        out_path=args.out,
+        blackpad_enabled=not args.no_blackpad,
+        blackpad_input_dir=args.blackpad_input_dir,
+        blackpad_fraction=args.blackpad_fraction,
+        blackpad_min_padding=args.blackpad_min_padding,
+    )
+    predict_source: str | list[str]
+    if args.source.is_file():
+        predict_source = str(images[0]) if images else str(args.source)
+    elif not args.no_blackpad:
+        predict_source = str((args.blackpad_input_dir or default_blackpad_input_dir(args.out)))
+    else:
+        predict_source = str(args.source)
+    predict_kwargs: dict[str, Any] = {"source": predict_source, "conf": args.conf, "stream": True}
     if args.device is not None:
         predict_kwargs["device"] = args.device
     if args.imgsz is not None:
@@ -274,7 +359,6 @@ def main() -> None:
     written = 0
     with args.out.open("w", encoding="utf-8") as handle:
         if args.tta:
-            images = iter_images(args.source)
             degrees = parse_float_list(args.tta_degrees)
             scales = parse_float_list(args.tta_scales)
             result_iter = []
@@ -291,21 +375,25 @@ def main() -> None:
                 result_iter.append((str(image_path), prediction, vote_count))
         else:
             result_iter = [
-                (str(getattr(result, "path", "")), result_to_prediction(result), 1)
+                (
+                    str(getattr(result, "path", "")),
+                    result_to_prediction(result, source=str(getattr(result, "path", ""))),
+                    1,
+                )
                 for result in model.predict(**predict_kwargs)
             ]
 
         for source, prediction, vote_count in result_iter:
+            metadata = metadata_for_source(source_metadata, prediction.source if prediction is not None else source)
             if prediction is None:
                 record = {
-                    "source": source,
                     "action": "reject_or_relabel",
                     "final_confidence": 0.0,
                     "flags": ["no_valid_pose_prediction"],
                 }
             else:
                 record = fuse_prediction(prediction, cfg)
-                record = apply_image_quality_gates(record, Path(prediction.source or source), cfg)
+                record = apply_image_quality_gates(record, Path(metadata["source"]), cfg)
                 record["keypoints"] = [list(kp) for kp in prediction.keypoints]
                 record["image_size"] = {
                     "width": prediction.image_size.width,
@@ -315,6 +403,7 @@ def main() -> None:
                     record["tta_votes"] = vote_count
                     record["tta_degrees"] = parse_float_list(args.tta_degrees)
                     record["tta_scales"] = parse_float_list(args.tta_scales)
+            record = attach_prediction_metadata(record, metadata)
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
             written += 1
     print(f"Wrote {written} prediction record(s) to {args.out}")

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Promoted ROI localization to `V1.1`: `tools/predict_roi.py` now applies black-border pre-enhancement to every input image by default before YOLO-Pose inference and postprocessing.
 - Added the short `vf_roi_v1` alias for the current recommended LDP-pseudo containment ROI model.
 - Merged the former `exp/keypoint-containment-loss` workflow into `main`; future containment-loss and LDP pseudo fine-tuning work should continue on `main`.
 - Added configurable confidence sharpening via `confidence_gamma` for postprocessed ROI decisions.

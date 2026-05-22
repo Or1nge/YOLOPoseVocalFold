@@ -159,7 +159,7 @@ python tools/train_keypoint_containment.py \
 
 ## 推理
 
-当前推荐模型短名为 `vf_roi_v1`：
+当前推荐 ROI 定位算法版本为 `V1.1`：使用 `vf_roi_v1` 权重，并在每张输入图像进入模型前自动增加四周黑边。
 
 ```text
 Results/models/vf_roi_v1/best.pt
@@ -173,10 +173,16 @@ python tools/predict_roi.py \
   --out Results/predictions/val_predictions.jsonl
 ```
 
+V1.1 的默认前处理会把每张图按长边 30%、最少 80 px 加四周黑边，黑边图写到
+`<out_stem>_blackpad_inputs/`，预测坐标也基于这份黑边图。JSONL 中 `source` 指向黑边图，
+`original_source` 保留原图路径，`preprocess` 记录 padding 和尺寸。仅做消融时可加 `--no-blackpad`。
+
 每条输出包含：
 
 - `bbox_yolo`
 - `bbox_keypoints`
+- `original_source`
+- `preprocess`
 - `roi_polygon`: 由 3 点生成的角平分线旋转 ROI
 - `final_box_polygon`: 最终四点旋转框；一条边平行于前联合夹角的角平分线，左右宽度按两侧后方点到角平分线的投影分别扩张
 - `final_bbox_xyxy` / `final_bbox`: 最终旋转框的 axis-aligned 外接矩形，仅用于兼容传统 bbox 评估
