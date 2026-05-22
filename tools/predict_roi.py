@@ -345,11 +345,9 @@ def main() -> None:
     )
     predict_source: str | list[str]
     if args.source.is_file():
-        predict_source = str(images[0]) if images else str(args.source)
-    elif not args.no_blackpad:
-        predict_source = str((args.blackpad_input_dir or default_blackpad_input_dir(args.out)).resolve())
+        predict_source = str(images[0].resolve()) if images else str(args.source.resolve())
     else:
-        predict_source = str(args.source.resolve())
+        predict_source = [str(path.resolve()) for path in images]
     predict_kwargs: dict[str, Any] = {"source": predict_source, "conf": args.conf, "stream": True}
     if args.device is not None:
         predict_kwargs["device"] = args.device
