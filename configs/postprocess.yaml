@@ -23,8 +23,6 @@ confidence_consistency_weight: 0.25
 min_roi_area_ratio: 0.03
 good_roi_area_ratio: 0.08
 keypoint_image_bounds_tolerance_px: 5.0
-min_anterior_y_offset_ratio: 0.0
-good_anterior_y_offset_ratio: 0.10
 roi_dark_luma_threshold: 75.0
 min_roi_dark_fraction: 0.10
 good_roi_dark_fraction: 0.20

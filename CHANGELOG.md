@@ -7,7 +7,7 @@
 - Added configurable confidence sharpening via `confidence_gamma` for postprocessed ROI decisions.
 - Added a configurable `tanh` confidence curve for postprocessed ROI decisions while keeping the previous power/gamma curve available.
 - Added ROI-area and keypoint image-boundary confidence gates to reduce usable boxes on obvious non-vocal-fold LDP images.
-- Added an anterior-vs-posterior point orientation gate for inverted three-point predictions.
+- Removed the anterior-vs-posterior image-y ordering gate; anterior/posterior keypoints are no longer rejected solely because patient position flips their vertical order.
 - Added a configurable predicted-ROI dark-region gate to downgrade bright/highlight-only regions without using manual annotations.
 - Added tooling and a YOLO11m containment recipe for training with 60 empty-label `混杂图片` negative samples.
 - Added an LDP pseudo-label fine-tuning recipe that copies accepted/review non-`混杂图片` predictions as YOLO-Pose positives, uses all `混杂图片` as empty-label negatives, and repeats mixed false accepts as hard negatives.

@@ -137,15 +137,13 @@ auto_accept_threshold = 0.43
 min_roi_area_ratio = 0.03
 good_roi_area_ratio = 0.08
 keypoint_image_bounds_tolerance_px = 5.0
-min_anterior_y_offset_ratio = 0.0
-good_anterior_y_offset_ratio = 0.10
 roi_dark_luma_threshold = 75.0
 min_roi_dark_fraction = 0.10
 good_roi_dark_fraction = 0.20
 ```
 
 `confidence_curve` 会同时作用于检测框置信度和关键点置信度；当前 `tanh` 曲线在 0.65 附近拉开中低置信度和高置信度，同时避免简单平方把 0.9 这类高置信度也压低太多。旧行为可用 `confidence_curve=power` 且 `confidence_gamma=2.0` 复现。ROI 面积和关键点图像边界 gate 用于降低明显非声带区域的“可用框”风险。
-`anterior_y_offset_ratio` 要求前联合 A 在图像 y 方向上低于 L/R 后方点中点，用于压低三点方向倒置的假阳性。
+后处理不要求前联合 A 在图像 y 方向上低于 L/R 后方点；体位和镜头方向可能改变上下关系，三点只通过夹角、几何一致性、ROI 面积、图像边界和暗区比例等规则判断。
 启用 `roi_dark_fraction` 后，推理会额外检查预测旋转 ROI 内是否存在足够暗的声门样区域；该 gate 只使用预测框和原图像素，不依赖人工标注。
 
 本机如果数据放在 main checkout，可这样启动单个 lambda：
@@ -189,7 +187,6 @@ python tools/predict_roi.py \
 - `consistency_score`
 - `roi_area_ratio` / `roi_area_factor`
 - `max_keypoint_outside_image_px` / `image_bounds_factor`
-- `anterior_y_offset_ratio` / `anterior_position_factor`
 - `roi_dark_fraction` / `roi_dark_factor`
 - `final_confidence`
 - `action`: `auto_accept`, `manual_review`, `reject_or_relabel`

@@ -191,7 +191,7 @@ def test_keypoint_outside_image_bounds_forces_rejection() -> None:
     assert "keypoints_outside_image" in output["flags"]
 
 
-def test_inverted_anterior_point_orientation_forces_rejection() -> None:
+def test_anterior_point_y_order_does_not_force_rejection() -> None:
     prediction = PosePrediction(
         bbox=(20, 20, 80, 80),
         bbox_conf=0.95,
@@ -204,13 +204,9 @@ def test_inverted_anterior_point_orientation_forces_rejection() -> None:
         prediction,
         PostprocessConfig(
             confidence_gamma=2.0,
-            min_anterior_y_offset_ratio=0.0,
-            good_anterior_y_offset_ratio=0.10,
         ),
     )
 
-    assert output["anterior_y_offset_ratio"] < 0.0
-    assert output["anterior_position_factor"] == 0.0
-    assert output["action"] == "reject_or_relabel"
-    assert output["usable_box_polygon"] is None
-    assert "anterior_point_not_below_posterior_points" in output["flags"]
+    assert output["final_confidence"] > 0.0
+    assert "anterior_point_not_below_posterior_points" not in output["flags"]
+    assert "weak_anterior_posterior_orientation" not in output["flags"]

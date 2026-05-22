@@ -48,8 +48,6 @@ class PostprocessConfig:
     min_roi_area_ratio: float = 0.0
     good_roi_area_ratio: float = 0.0
     keypoint_image_bounds_tolerance_px: float = 0.0
-    min_anterior_y_offset_ratio: float = 0.0
-    good_anterior_y_offset_ratio: float = 0.0
     roi_dark_luma_threshold: float = 0.0
     min_roi_dark_fraction: float = 0.0
     good_roi_dark_fraction: float = 0.0
@@ -140,17 +138,6 @@ def _max_keypoint_outside_image_px(
         x, y = float(point[0]), float(point[1])
         max_distance = max(max_distance, -x, x - image_size.width, -y, y - image_size.height)
     return max(0.0, max_distance)
-
-
-def _anterior_y_offset_ratio(keypoints: Sequence[Sequence[float]]) -> float | None:
-    if len(keypoints) != 3:
-        return None
-    anterior, left, right = keypoints
-    posterior_mid_y = (float(left[1]) + float(right[1])) / 2.0
-    posterior_width = math.hypot(float(left[0]) - float(right[0]), float(left[1]) - float(right[1]))
-    if posterior_width <= 0.0:
-        return None
-    return float((float(anterior[1]) - posterior_mid_y) / posterior_width)
 
 
 def fuse_prediction(prediction: PosePrediction, cfg: PostprocessConfig) -> dict[str, Any]:
@@ -251,23 +238,6 @@ def fuse_prediction(prediction: PosePrediction, cfg: PostprocessConfig) -> dict[
         flags.append("keypoints_outside_image")
         image_bounds_factor = 0.0
 
-    anterior_offset_ratio = _anterior_y_offset_ratio(keypoints)
-    anterior_position_factor = _lower_bound_factor(
-        anterior_offset_ratio,
-        cfg.min_anterior_y_offset_ratio,
-        cfg.good_anterior_y_offset_ratio,
-    )
-    if (
-        anterior_offset_ratio is not None
-        and cfg.good_anterior_y_offset_ratio > 0.0
-        and anterior_offset_ratio < cfg.good_anterior_y_offset_ratio
-    ):
-        flags.append(
-            "anterior_point_not_below_posterior_points"
-            if anterior_offset_ratio <= cfg.min_anterior_y_offset_ratio
-            else "weak_anterior_posterior_orientation"
-        )
-
     bbox_conf_factor = _confidence_factor(float(prediction.bbox_conf), cfg)
     keypoint_conf_factor = _confidence_factor(kp_conf, cfg)
     consistency_factor = consistency ** max(float(cfg.confidence_consistency_weight), 0.0)
@@ -278,7 +248,6 @@ def fuse_prediction(prediction: PosePrediction, cfg: PostprocessConfig) -> dict[
         * consistency_factor
         * roi_area_factor
         * image_bounds_factor
-        * anterior_position_factor
     )
     final_confidence = max(0.0, min(1.0, final_confidence))
     action = decide_action(final_confidence, cfg)
@@ -307,8 +276,6 @@ def fuse_prediction(prediction: PosePrediction, cfg: PostprocessConfig) -> dict[
         "final_bbox_area_ratio": final_bbox_area_ratio,
         "max_keypoint_outside_image_px": keypoint_outside_image_px,
         "image_bounds_factor": image_bounds_factor,
-        "anterior_y_offset_ratio": anterior_offset_ratio,
-        "anterior_position_factor": anterior_position_factor,
         "bbox_confidence_factor": bbox_conf_factor,
         "keypoint_confidence_factor": keypoint_conf_factor,
         "containment_rate": contained,
