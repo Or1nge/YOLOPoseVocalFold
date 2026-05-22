@@ -38,6 +38,23 @@ def parse_args() -> argparse.Namespace:
         default=["auto_accept"],
         help="Prediction actions to crop. Defaults to high-confidence auto_accept only.",
     )
+    parser.add_argument(
+        "--copy-original-actions",
+        nargs="*",
+        default=[],
+        help="Prediction actions to keep as uncropped original images.",
+    )
+    parser.add_argument(
+        "--copy-original-classes",
+        nargs="*",
+        default=[],
+        help="Optional class-name allowlist for --copy-original-actions. Empty means all classes.",
+    )
+    parser.add_argument(
+        "--fallback-original-on-crop-failure",
+        action="store_true",
+        help="Copy the original image when a requested crop cannot be produced.",
+    )
     parser.add_argument("--crop-mode", choices=["polygon", "bbox"], default="polygon")
     parser.add_argument("--jpeg-quality", type=int, default=95)
     return parser.parse_args()
@@ -129,6 +146,13 @@ def save_image(image: Image.Image, path: Path, quality: int) -> None:
         image.save(path)
 
 
+def copy_original_image(source: Path, destination: Path) -> None:
+    import shutil
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+
+
 def class_from_relative(rel_path: Path, allowed_classes: set[str]) -> str | None:
     if not rel_path.parts:
         return None
@@ -140,6 +164,8 @@ def main() -> None:
     args = parse_args()
     allowed_classes = set(args.classes)
     crop_actions = set(args.crop_actions)
+    copy_original_actions = set(args.copy_original_actions)
+    copy_original_classes = set(args.copy_original_classes)
     source_root = args.source_root if args.source_root.is_absolute() else args.source_root.absolute()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     for class_name in args.classes:
@@ -172,6 +198,7 @@ def main() -> None:
         out_rel = rel_path
         out_path = args.out_dir / out_rel
         cropped = False
+        copied_original = False
         error = ""
         if action in crop_actions:
             try:
@@ -186,6 +213,14 @@ def main() -> None:
             except Exception as exc:  # noqa: BLE001 - manifest should preserve per-image failures.
                 failures["crop_error"] += 1
                 error = f"{type(exc).__name__}: {exc}"
+            if (not cropped) and args.fallback_original_on_crop_failure:
+                copy_original_image(source, out_path)
+                copied_original = True
+                counts[class_name]["copied_original"] += 1
+        elif action in copy_original_actions and (not copy_original_classes or class_name in copy_original_classes):
+            copy_original_image(source, out_path)
+            copied_original = True
+            counts[class_name]["copied_original"] += 1
 
         rows.append(
             {
@@ -194,7 +229,9 @@ def main() -> None:
                 "class_name": class_name,
                 "action": action,
                 "cropped": cropped,
+                "copied_original": copied_original,
                 "crop_path": str(out_path) if cropped else "",
+                "output_path": str(out_path) if cropped or copied_original else "",
                 "final_confidence": record.get("final_confidence", ""),
                 "bbox_confidence": record.get("bbox_confidence", ""),
                 "keypoint_confidence": record.get("keypoint_confidence", ""),
@@ -214,7 +251,9 @@ def main() -> None:
             "class_name",
             "action",
             "cropped",
+            "copied_original",
             "crop_path",
+            "output_path",
             "final_confidence",
             "bbox_confidence",
             "keypoint_confidence",
@@ -234,6 +273,9 @@ def main() -> None:
         "out_dir": str(args.out_dir),
         "classes": list(args.classes),
         "crop_actions": sorted(crop_actions),
+        "copy_original_actions": sorted(copy_original_actions),
+        "copy_original_classes": sorted(copy_original_classes),
+        "fallback_original_on_crop_failure": bool(args.fallback_original_on_crop_failure),
         "crop_mode": args.crop_mode,
         "total_records": len(rows),
         "counts_by_class": {class_name: dict(counts[class_name]) for class_name in args.classes},

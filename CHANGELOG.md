@@ -3,7 +3,12 @@
 ## Unreleased
 
 - Promoted ROI localization to `V1.1`: `tools/predict_roi.py` now applies black-border pre-enhancement to every input image by default before YOLO-Pose inference and postprocessing.
+- Changed directory/list ROI prediction to stream one image at a time so full LDP inference does not batch thousands of paths into GPU memory.
+- Added `--copy-original-classes` to ROI crop export, allowing rules such as cropping accepted/review images while keeping only `混杂图片` rejects as originals and skipping other rejects.
 - Added the short `vf_roi_v1` alias for the current recommended LDP-pseudo containment ROI model.
+- Added `--copy-original-actions` and `--fallback-original-on-crop-failure` to ROI crop export so rejected predictions can be retained as original images for downstream classification datasets.
+- Added `tools/blackpad_image_tree.py` to copy image folders while adding the black border used by the V1 ROI training setup before prediction and crop export.
+- Added `tools/evaluate_four_class_checkpoint.py` for evaluating a laryngeal 4-class checkpoint on folder-structured external datasets.
 - Merged the former `exp/keypoint-containment-loss` workflow into `main`; future containment-loss and LDP pseudo fine-tuning work should continue on `main`.
 - Added configurable confidence sharpening via `confidence_gamma` for postprocessed ROI decisions.
 - Added a configurable `tanh` confidence curve for postprocessed ROI decisions while keeping the previous power/gamma curve available.

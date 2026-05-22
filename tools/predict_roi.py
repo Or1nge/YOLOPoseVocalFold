@@ -343,12 +343,7 @@ def main() -> None:
         blackpad_fraction=args.blackpad_fraction,
         blackpad_min_padding=args.blackpad_min_padding,
     )
-    predict_source: str | list[str]
-    if args.source.is_file():
-        predict_source = str(images[0].resolve()) if images else str(args.source.resolve())
-    else:
-        predict_source = [str(path.resolve()) for path in images]
-    predict_kwargs: dict[str, Any] = {"source": predict_source, "conf": args.conf, "stream": True}
+    predict_kwargs: dict[str, Any] = {"conf": args.conf, "stream": True, "verbose": False}
     if args.device is not None:
         predict_kwargs["device"] = args.device
     if args.imgsz is not None:
@@ -373,10 +368,11 @@ def main() -> None:
                 )
                 result_iter.append((str(image_path), prediction, vote_count))
         else:
-            result_iter = [
+            result_iter = (
                 (str(image_path), result_to_prediction(result, source=str(image_path)), 1)
-                for image_path, result in zip(images, model.predict(**predict_kwargs), strict=False)
-            ]
+                for image_path in images
+                for result in model.predict(source=str(image_path.resolve()), **predict_kwargs)
+            )
 
         for source, prediction, vote_count in result_iter:
             metadata = metadata_for_source(source_metadata, prediction.source if prediction is not None else source)
