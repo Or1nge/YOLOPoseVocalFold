@@ -17,6 +17,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from yoloposevf.preprocess import blackpad_image_file  # noqa: E402
+
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
@@ -29,9 +31,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--negative-source-dir", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--count", type=int, default=60)
+    parser.add_argument("--all", action="store_true", help="Use all readable negatives after exclusions.")
+    parser.add_argument(
+        "--exclude-manifest",
+        type=Path,
+        help="JSONL manifest whose source/original_source/source_key images must be excluded.",
+    )
     parser.add_argument("--seed", type=int, default=20260522)
     parser.add_argument("--split", choices=["train", "val", "test"], default="train")
     parser.add_argument("--prefix", default="mixed_negative")
+    parser.add_argument(
+        "--blackpad-negatives",
+        action="store_true",
+        help="Apply the V1.1 black-border preprocessing to added negative images.",
+    )
+    parser.add_argument("--blackpad-fraction", type=float, default=0.30)
+    parser.add_argument("--blackpad-min-padding", type=int, default=80)
+    parser.add_argument("--jpeg-quality", type=int, default=95)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -45,6 +61,22 @@ def verify_image(path: Path) -> tuple[int, int]:
         image.verify()
     with Image.open(path) as image:
         return image.width, image.height
+
+
+def read_excluded_paths(path: Path | None) -> set[Path]:
+    if path is None:
+        return set()
+    excluded: set[Path] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        for key in ("source_key", "original_source", "source"):
+            value = row.get(key)
+            if value:
+                excluded.add(Path(str(value)).resolve())
+                break
+    return excluded
 
 
 def copy_base_dataset(base_dataset: Path, out_dir: Path, *, overwrite: bool) -> None:
@@ -64,7 +96,7 @@ def update_dataset_yaml(out_dir: Path) -> dict[str, Any]:
 
 
 def add_negatives(args: argparse.Namespace) -> dict[str, Any]:
-    if args.count <= 0:
+    if args.count <= 0 and not args.all:
         raise ValueError("--count must be positive")
     if not args.base_dataset.exists():
         raise FileNotFoundError(args.base_dataset)
@@ -74,18 +106,21 @@ def add_negatives(args: argparse.Namespace) -> dict[str, Any]:
     copy_base_dataset(args.base_dataset, args.out_dir, overwrite=args.overwrite)
     dataset_yaml = update_dataset_yaml(args.out_dir)
 
+    excluded_paths = read_excluded_paths(args.exclude_manifest)
     candidates = []
     for image_path in iter_images(args.negative_source_dir):
+        if image_path.resolve() in excluded_paths:
+            continue
         try:
             width, height = verify_image(image_path)
         except Exception:
             continue
         candidates.append({"path": image_path, "width": width, "height": height})
-    if len(candidates) < args.count:
+    if not args.all and len(candidates) < args.count:
         raise ValueError(f"Only {len(candidates)} readable images found, need {args.count}")
 
     rng = random.Random(args.seed)
-    selected = rng.sample(candidates, args.count)
+    selected = list(candidates) if args.all else rng.sample(candidates, args.count)
 
     images_dir = args.out_dir / "images" / args.split
     labels_dir = args.out_dir / "labels" / args.split
@@ -98,8 +133,20 @@ def add_negatives(args: argparse.Namespace) -> dict[str, Any]:
         dest_name = f"{args.prefix}_{index:03d}__{source_path.stem}{source_path.suffix.lower()}"
         image_dest = images_dir / dest_name
         label_dest = labels_dir / f"{Path(dest_name).stem}.txt"
-        shutil.copy2(source_path, image_dest)
+        preprocess: dict[str, Any] | None = None
+        if args.blackpad_negatives:
+            preprocess = blackpad_image_file(
+                source_path,
+                image_dest,
+                fraction=args.blackpad_fraction,
+                min_padding=args.blackpad_min_padding,
+                jpeg_quality=args.jpeg_quality,
+            ).to_dict()
+        else:
+            shutil.copy2(source_path, image_dest)
         label_dest.write_text("", encoding="utf-8")
+        output_width = preprocess["padded_width"] if preprocess else item["width"]
+        output_height = preprocess["padded_height"] if preprocess else item["height"]
         rows.append(
             {
                 "index": index,
@@ -107,8 +154,12 @@ def add_negatives(args: argparse.Namespace) -> dict[str, Any]:
                 "source_path": str(source_path.resolve()),
                 "image_path": str(image_dest.resolve()),
                 "label_path": str(label_dest.resolve()),
-                "width": item["width"],
-                "height": item["height"],
+                "original_width": item["width"],
+                "original_height": item["height"],
+                "width": output_width,
+                "height": output_height,
+                "preprocess_type": preprocess["type"] if preprocess else "none",
+                "blackpad_padding_px": preprocess["padding_px"] if preprocess else 0,
                 "label_type": "empty_negative",
             }
         )
@@ -125,7 +176,13 @@ def add_negatives(args: argparse.Namespace) -> dict[str, Any]:
         "negative_source_dir": str(args.negative_source_dir.resolve()),
         "split": args.split,
         "count": len(rows),
+        "requested_count": "all" if args.all else args.count,
         "seed": args.seed,
+        "exclude_manifest": str(args.exclude_manifest.resolve()) if args.exclude_manifest else None,
+        "excluded_source_count": len(excluded_paths),
+        "blackpad_negatives": bool(args.blackpad_negatives),
+        "blackpad_fraction": args.blackpad_fraction if args.blackpad_negatives else None,
+        "blackpad_min_padding": args.blackpad_min_padding if args.blackpad_negatives else None,
         "label_contract": "empty YOLO label file means background/no glottic ROI",
         "dataset_yaml": dataset_yaml,
         "samples": rows,

@@ -24,7 +24,8 @@ ALGORITHM_VERSION = "V1.1"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run YOLO-Pose inference and anatomy-constrained ROI postprocessing.")
     parser.add_argument("--weights", type=Path, required=True)
-    parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--source", type=Path, help="Image file or directory. Not required when --manifest is used.")
+    parser.add_argument("--manifest", type=Path, help="JSONL manifest with image paths in original_source/source_key/source.")
     parser.add_argument("--postprocess-config", type=Path, default=Path("configs/postprocess.yaml"))
     parser.add_argument("--out", type=Path, default=Path("Results/predictions/predictions.jsonl"))
     parser.add_argument("--conf", type=float, default=0.25)
@@ -56,6 +57,39 @@ def iter_images(source: Path) -> list[Path]:
     return sorted(path for path in source.rglob("*") if path.suffix.lower() in IMAGE_EXTENSIONS)
 
 
+def read_manifest_records(path: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        records.append(json.loads(line))
+    return records
+
+
+def manifest_image_path(record: dict[str, Any]) -> Path:
+    for field in ("original_source", "source_key", "source"):
+        value = record.get(field)
+        if value:
+            return Path(str(value))
+    raise ValueError("manifest record has no original_source/source_key/source path")
+
+
+def unique_manifest_relative_path(record: dict[str, Any], image_path: Path, index: int, used: set[Path]) -> Path:
+    class_name = str(record.get("class_name") or "manifest")
+    candidate = Path(class_name) / image_path.name
+    if candidate not in used:
+        used.add(candidate)
+        return candidate
+    stem = image_path.stem
+    suffix = image_path.suffix
+    for counter in range(1, 10000):
+        candidate = Path(class_name) / f"{stem}_{index:05d}_{counter}{suffix}"
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+    raise RuntimeError(f"could not make unique manifest path for {image_path}")
+
+
 def default_blackpad_input_dir(out_path: Path) -> Path:
     return out_path.parent / f"{out_path.stem}_blackpad_inputs"
 
@@ -67,30 +101,46 @@ def relative_image_path(image_path: Path, source: Path) -> Path:
 
 
 def prepare_inference_images(
-    source: Path,
+    source: Path | None,
     *,
+    manifest: Path | None,
     out_path: Path,
     blackpad_enabled: bool,
     blackpad_input_dir: Path | None,
     blackpad_fraction: float,
     blackpad_min_padding: int,
 ) -> tuple[list[Path], dict[str, dict[str, Any]]]:
-    images = iter_images(source)
+    manifest_records = read_manifest_records(manifest) if manifest is not None else []
+    if manifest_records:
+        image_rows = [(manifest_image_path(record), record) for record in manifest_records]
+    else:
+        if source is None:
+            raise ValueError("--source is required when --manifest is not provided")
+        image_rows = [(image_path, {}) for image_path in iter_images(source)]
     metadata: dict[str, dict[str, Any]] = {}
     if not blackpad_enabled:
-        for image_path in images:
+        images = [image_path for image_path, _ in image_rows]
+        for index, (image_path, record) in enumerate(image_rows):
             resolved = image_path.resolve()
             metadata[str(image_path.resolve())] = {
                 "source": str(resolved),
                 "original_source": str(resolved),
                 "preprocess": {"type": "none"},
+                "manifest_index": index,
+                "class_name": record.get("class_name"),
+                "source_key": record.get("source_key"),
             }
         return images, metadata
 
     pad_root = (blackpad_input_dir or default_blackpad_input_dir(out_path)).resolve()
     padded_images: list[Path] = []
-    for image_path in images:
-        rel = relative_image_path(image_path, source)
+    used_rel_paths: set[Path] = set()
+    for index, (image_path, record) in enumerate(image_rows):
+        if manifest_records:
+            rel = unique_manifest_relative_path(record, image_path, index, used_rel_paths)
+        else:
+            assert source is not None
+            rel = relative_image_path(image_path, source)
         destination = pad_root / rel
         info = blackpad_image_file(
             image_path,
@@ -103,6 +153,9 @@ def prepare_inference_images(
             "source": str(destination.resolve()),
             "original_source": str(image_path.resolve()),
             "preprocess": info.to_dict(),
+            "manifest_index": index,
+            "class_name": record.get("class_name"),
+            "source_key": record.get("source_key"),
         }
     return padded_images, metadata
 
@@ -323,6 +376,9 @@ def attach_prediction_metadata(record: dict[str, Any], metadata: dict[str, Any])
     record["source"] = metadata["source"]
     record["original_source"] = metadata["original_source"]
     record["preprocess"] = metadata["preprocess"]
+    for field in ("manifest_index", "class_name", "source_key"):
+        if metadata.get(field) is not None:
+            record[field] = metadata[field]
     return record
 
 
@@ -337,6 +393,7 @@ def main() -> None:
     model = YOLO(str(args.weights))
     images, source_metadata = prepare_inference_images(
         args.source,
+        manifest=args.manifest,
         out_path=args.out,
         blackpad_enabled=not args.no_blackpad,
         blackpad_input_dir=args.blackpad_input_dir,

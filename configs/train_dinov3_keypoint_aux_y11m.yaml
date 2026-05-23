@@ -1,0 +1,38 @@
+data: data/yolo_pose_mixed_negative_60_blackpad/vocal_fold_pose.yaml
+project: Results/dinov3_keypoint_aux
+name: dinov3_vits16_three_point_aux_448_mixedneg60
+imgsz: 448
+epochs: 30
+batch: 16
+workers: 8
+device: 0
+seed: 42
+exist_ok: false
+
+learning_rate: 0.001
+weight_decay: 0.0001
+
+dinov3:
+  # DINOv3 weights are intentionally external to this repo. The official
+  # facebook/* repo is gated; the public timm/* ViT-S/16 checkpoint is used by
+  # default and still resolves through Hugging Face cache.
+  backend: timm
+  timm_model_name: vit_small_patch16_dinov3.lvd1689m
+  repo_dir: null
+  model_name: dinov3_vits16
+  weights: null
+  transformers_model: facebook/dinov3-vits16-pretrain-lvd1689m
+
+  background_points: 12
+  corrupted_triplets: 3
+  corrupted_jitter: 0.10
+  min_background_distance: 0.08
+
+  point_hidden_dim: 256
+  triplet_hidden_dim: 512
+  image_hidden_dim: 256
+
+  point_loss_weight: 1.0
+  triplet_loss_weight: 1.0
+  image_loss_weight: 0.20
+  score_mode: geometric_mean

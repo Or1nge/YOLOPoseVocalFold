@@ -1,0 +1,68 @@
+base:
+  model: Results/models/vf_roi_v1/best.pt
+  data: data/yolo_pose_stage2_ldp_conf040_holdout100/vocal_fold_pose.yaml
+  project: Results/keypoint_local_contrast
+  name: yolo_pose_glottic_three_point_y11m_img960_containment_l0p05_ldp_pseudo_keypoint_contrast
+  imgsz: 960
+  epochs: 60
+  batch: 8
+  workers: 4
+  device: 0
+  patience: 18
+  seed: 42
+  exist_ok: false
+
+  # Preserve A/L/R point semantics. Flips would swap anatomy labels.
+  fliplr: 0.0
+  flipud: 0.0
+
+  # Keep base augmentation mild; the contrast branch adds its own synchronized second view.
+  degrees: 8.0
+  translate: 0.04
+  scale: 0.12
+  shear: 0.0
+  perspective: 0.0
+  hsv_h: 0.01
+  hsv_s: 0.16
+  hsv_v: 0.16
+  mosaic: 0.0
+  close_mosaic: 0
+  mixup: 0.0
+  cutmix: 0.0
+  copy_paste: 0.0
+  erasing: 0.0
+  auto_augment: null
+
+  pose: 24.0
+  kobj: 1.5
+  box: 4.0
+  cls: 0.2
+  dfl: 1.0
+
+containment_loss:
+  margin: 0.0
+  normalize_by_box_size: true
+  reduction: mean
+
+keypoint_contrast:
+  feature_index: 0
+  projection_dim: 64
+  projection_hidden_dim: 128
+  temperature: 0.10
+  patch_radius: 1
+  negative_count: 12
+  negative_min_distance: 0.12
+  augment_degrees: 5.0
+  augment_scale: 0.08
+  augment_translate: 0.03
+  augment_brightness: 0.08
+  augment_contrast: 0.12
+
+sweep:
+  lambda_containment:
+    - 0.05
+  lambda_contrast:
+    - 0.0
+    - 0.01
+    - 0.02
+    - 0.05

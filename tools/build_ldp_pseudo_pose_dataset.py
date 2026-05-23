@@ -50,7 +50,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hard-negative-actions", nargs="*", default=["auto_accept"])
     parser.add_argument("--negative-repeat", type=int, default=1)
     parser.add_argument("--hard-negative-repeat", type=int, default=8)
-    parser.add_argument("--min-positive-confidence", type=float, default=0.30)
+    parser.add_argument("--min-positive-confidence", type=float, default=0.40)
+    parser.add_argument(
+        "--exclude-manifest",
+        type=Path,
+        help="JSONL manifest of LDP holdout records to exclude from pseudo-label training.",
+    )
     parser.add_argument("--split", choices=["train", "val", "test"], default="train")
     parser.add_argument("--copy-mode", choices=["symlink", "copy"], default="symlink")
     parser.add_argument("--prefix", default="ldp_pseudo")
@@ -86,6 +91,22 @@ def class_from_source(source: Path) -> str:
     return source.parent.name
 
 
+def stable_source_key(record: dict[str, Any]) -> str:
+    source = record.get("original_source") or record.get("source") or ""
+    return str(Path(str(source)).resolve())
+
+
+def load_excluded_sources(path: Path | None) -> set[str]:
+    if path is None:
+        return set()
+    excluded = set()
+    for record in read_jsonl(path):
+        key = record.get("source_key") or record.get("original_source") or record.get("source")
+        if key:
+            excluded.add(str(Path(str(key)).resolve()))
+    return excluded
+
+
 def unique_image_name(prefix: str, class_name: str, source: Path, repeat_index: int | None = None) -> str:
     safe_class = class_name.replace("/", "_")
     repeat = "" if repeat_index is None else f"__r{repeat_index:02d}"
@@ -102,6 +123,31 @@ def link_or_copy(source: Path, destination: Path, mode: str) -> None:
         destination.chmod(destination.stat().st_mode | stat.S_IWUSR | stat.S_IRUSR)
     else:
         destination.symlink_to(source.resolve())
+
+
+def link_copy_or_materialize(record: dict[str, Any], source: Path, destination: Path, mode: str) -> None:
+    if source.exists():
+        link_or_copy(source, destination, mode)
+        return
+
+    original = Path(str(record.get("original_source", "")))
+    preprocess = record.get("preprocess") or {}
+    if original.exists() and preprocess.get("type") == "blackpad":
+        padding = int(preprocess.get("padding_px") or 0)
+        padded_width = int(preprocess.get("padded_width") or 0)
+        padded_height = int(preprocess.get("padded_height") or 0)
+        if padding < 0 or padded_width <= 0 or padded_height <= 0:
+            raise FileNotFoundError(f"Cannot materialize blackpad image for {source}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(original) as image:
+            rgb = image.convert("RGB")
+            canvas = Image.new("RGB", (padded_width, padded_height), "black")
+            canvas.paste(rgb, (padding, padding))
+            canvas.save(destination, quality=95)
+        destination.chmod(destination.stat().st_mode | stat.S_IWUSR | stat.S_IRUSR)
+        return
+
+    raise FileNotFoundError(f"Source image not found and cannot be materialized: {source}")
 
 
 def image_size(record: dict[str, Any], image_path: Path) -> ImageSize:
@@ -135,6 +181,7 @@ def pseudo_label_from_prediction(record: dict[str, Any], image_path: Path) -> Yo
 
 def write_negative(
     *,
+    record: dict[str, Any],
     image_path: Path,
     class_name: str,
     images_dir: Path,
@@ -147,7 +194,7 @@ def write_negative(
     dest_name = unique_image_name(prefix, class_name, image_path, repeat_index)
     image_dest = images_dir / dest_name
     label_dest = labels_dir / f"{Path(dest_name).stem}.txt"
-    link_or_copy(image_path, image_dest, copy_mode)
+    link_copy_or_materialize(record, image_path, image_dest, copy_mode)
     label_dest.write_text("", encoding="utf-8")
     return {
         "source": str(image_path.resolve()),
@@ -174,15 +221,20 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
     negative_classes = set(args.negative_classes)
     positive_actions = set(args.positive_actions)
     hard_negative_actions = set(args.hard_negative_actions)
+    excluded_sources = load_excluded_sources(args.exclude_manifest)
     rows: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
 
     for record in read_jsonl(args.predictions):
         source = Path(str(record.get("source", "")))
-        if not source.exists() or source.suffix.lower() not in IMAGE_EXTENSIONS:
-            counts["skipped_missing_or_nonimage"] += 1
+        if stable_source_key(record) in excluded_sources:
+            counts["skipped_holdout"] += 1
             continue
-        class_name = class_from_source(source)
+        if source.suffix.lower() not in IMAGE_EXTENSIONS:
+            counts["skipped_nonimage"] += 1
+            continue
+        class_source = Path(str(record.get("original_source") or source))
+        class_name = class_from_source(class_source)
         action = str(record.get("action", ""))
         final_confidence = float(record.get("final_confidence") or 0.0)
 
@@ -194,6 +246,7 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
                 label_type = "ldp_hard_negative"
             for repeat_index in range(1, repeat + 1):
                 row = write_negative(
+                    record=record,
                     image_path=source,
                     class_name=class_name,
                     images_dir=images_dir,
@@ -211,7 +264,7 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
         if (
             class_name in positive_classes
             and action in positive_actions
-            and final_confidence >= float(args.min_positive_confidence)
+            and final_confidence > float(args.min_positive_confidence)
         ):
             label = pseudo_label_from_prediction(record, source)
             if label is None:
@@ -220,7 +273,7 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
             dest_name = unique_image_name(args.prefix, class_name, source)
             image_dest = images_dir / dest_name
             label_dest = labels_dir / f"{Path(dest_name).stem}.txt"
-            link_or_copy(source, image_dest, args.copy_mode)
+            link_copy_or_materialize(record, source, image_dest, args.copy_mode)
             label_dest.write_text(label.to_line() + "\n", encoding="utf-8")
             rows.append(
                 {
@@ -268,6 +321,9 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
         "negative_repeat": args.negative_repeat,
         "hard_negative_repeat": args.hard_negative_repeat,
         "min_positive_confidence": args.min_positive_confidence,
+        "positive_confidence_operator": ">",
+        "exclude_manifest": str(args.exclude_manifest.resolve()) if args.exclude_manifest else None,
+        "excluded_source_count": len(excluded_sources),
         "counts": dict(counts),
         "added_sample_count": len(rows),
         "label_contract": "empty label file means background/no glottic ROI",

@@ -1,0 +1,47 @@
+base:
+  model: Results/three_stage_oriented_contrast/pretrain/yolo11m_manual_only_oriented_kp_contrast_rect36x60/weights/best.pt
+  data: data/yolo_pose_mixed_negative_ldp200_blackpad_holdout_excluded/vocal_fold_pose.yaml
+  project: Results/three_stage_oriented_contrast/stage2_mixed_hard_negative
+  name: yolo11m_stage2_ldp200_blackpad_hardneg_from_oriented_pretrain_rect36x60
+  imgsz: 960
+  epochs: 40
+  batch: 32
+  workers: 8
+  device: 0
+  patience: 15
+  seed: 42
+  exist_ok: false
+
+  fliplr: 0.0
+  flipud: 0.0
+
+  degrees: 8.0
+  translate: 0.04
+  scale: 0.12
+  shear: 0.0
+  perspective: 0.0
+  hsv_h: 0.01
+  hsv_s: 0.16
+  hsv_v: 0.16
+  mosaic: 0.0
+  close_mosaic: 0
+  mixup: 0.0
+  cutmix: 0.0
+  copy_paste: 0.0
+  erasing: 0.0
+  auto_augment: null
+
+  pose: 24.0
+  kobj: 1.5
+  box: 4.0
+  cls: 0.2
+  dfl: 1.0
+
+containment_loss:
+  margin: 0.0
+  normalize_by_box_size: true
+  reduction: mean
+
+sweep:
+  lambda_containment:
+    - 0.05
