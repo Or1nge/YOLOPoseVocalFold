@@ -30,6 +30,7 @@ from yoloposevf.dinov3_aux import (  # noqa: E402
     sample_oriented_point_regions,
     sample_oriented_point_region_masks,
 )
+from yoloposevf.preprocess import crop_existing_black_borders  # noqa: E402
 from yoloposevf.run_archive import write_run_metadata  # noqa: E402
 
 
@@ -47,11 +48,13 @@ class YoloPoseAuxDataset(Dataset):
         hard_negative_points: int = 0,
         hard_negative_min_confidence: float = 0.30,
         hard_negative_min_distance: float = 0.08,
+        crop_black_border_luma_floor: float = 8.0,
     ) -> None:
         self.dataset_yaml = dataset_yaml
         self.imgsz = int(imgsz)
         self.hard_negative_points = int(hard_negative_points)
         self.hard_negative_min_distance = float(hard_negative_min_distance)
+        self.crop_black_border_luma_floor = float(crop_black_border_luma_floor)
         values = yaml.safe_load(dataset_yaml.read_text(encoding="utf-8")) or {}
         dataset_root = Path(values.get("path", dataset_yaml.parent))
         if not dataset_root.is_absolute():
@@ -81,8 +84,13 @@ class YoloPoseAuxDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, Any]:
         image_path, label_path = self.records[index]
         image = Image.open(image_path).convert("RGB")
-        width, height = image.size
-        image_tensor, scale, pad_x, pad_y = letterbox_tensor(image, self.imgsz)
+        original_width, original_height = image.size
+        cropped_image, crop_bbox = crop_existing_black_borders(
+            image,
+            luma_floor=self.crop_black_border_luma_floor,
+        )
+        crop_left, crop_top, _, _ = crop_bbox
+        image_tensor, scale, pad_x, pad_y, valid_mask = letterbox_tensor_and_valid_mask(cropped_image, self.imgsz)
         keypoints = torch.zeros((3, 2), dtype=torch.float32)
         keypoint_mask = torch.zeros((3,), dtype=torch.bool)
         has_pose = label_path.stat().st_size > 0
@@ -92,13 +100,23 @@ class YoloPoseAuxDataset(Dataset):
             raw_keypoints = values[5:14]
             for kp_index in range(3):
                 x_norm, y_norm, visibility = raw_keypoints[kp_index * 3 : kp_index * 3 + 3]
-                x_px = x_norm * width * scale + pad_x
-                y_px = y_norm * height * scale + pad_y
+                x_px = (x_norm * original_width - crop_left) * scale + pad_x
+                y_px = (y_norm * original_height - crop_top) * scale + pad_y
                 keypoints[kp_index] = torch.tensor([x_px / self.imgsz, y_px / self.imgsz])
                 keypoint_mask[kp_index] = visibility > 0
-        hard_points, hard_mask, hard_dirs = self._hard_negative_tensors(image_path, width, height, scale, pad_x, pad_y, keypoints, keypoint_mask)
+        hard_points, hard_mask, hard_dirs = self._hard_negative_tensors(
+            image_path,
+            crop_left,
+            crop_top,
+            scale,
+            pad_x,
+            pad_y,
+            keypoints,
+            keypoint_mask,
+        )
         return {
             "image": image_tensor,
+            "valid_mask": valid_mask,
             "keypoints": keypoints,
             "keypoint_mask": keypoint_mask,
             "hard_negative_points": hard_points,
@@ -111,8 +129,8 @@ class YoloPoseAuxDataset(Dataset):
     def _hard_negative_tensors(
         self,
         image_path: Path,
-        width: int,
-        height: int,
+        crop_left: int,
+        crop_top: int,
         scale: float,
         pad_x: float,
         pad_y: float,
@@ -128,8 +146,12 @@ class YoloPoseAuxDataset(Dataset):
         visible = keypoints[keypoint_mask]
         used = 0
         for item in self.hard_negatives.get(image_path.stem, []):
-            x_px = float(item["x"]) * scale + pad_x
-            y_px = float(item["y"]) * scale + pad_y
+            if item.get("coordinate_space") == "cropped":
+                x_px = float(item["x"]) * scale + pad_x
+                y_px = float(item["y"]) * scale + pad_y
+            else:
+                x_px = (float(item["x"]) - float(crop_left)) * scale + pad_x
+                y_px = (float(item["y"]) - float(crop_top)) * scale + pad_y
             point = torch.tensor([x_px / self.imgsz, y_px / self.imgsz], dtype=torch.float32).clamp(0.0, 1.0)
             if visible.numel():
                 distance = (visible - point).square().sum(dim=1).sqrt().min()
@@ -144,23 +166,40 @@ class YoloPoseAuxDataset(Dataset):
         return points, mask, dirs
 
 
-def letterbox_tensor(image: Image.Image, imgsz: int) -> tuple[torch.Tensor, float, float, float]:
-    width, height = image.size
+def letterbox_geometry(width: int, height: int, imgsz: int) -> tuple[float, tuple[int, int], float, float, int, int]:
     scale = min(float(imgsz) / max(width, 1), float(imgsz) / max(height, 1))
     resized = (max(1, round(width * scale)), max(1, round(height * scale)))
-    canvas = Image.new("RGB", (imgsz, imgsz), (0, 0, 0))
-    resized_image = image.resize(resized, Image.Resampling.BILINEAR)
     pad_x = (imgsz - resized[0]) / 2.0
     pad_y = (imgsz - resized[1]) / 2.0
-    canvas.paste(resized_image, (round(pad_x), round(pad_y)))
+    return scale, resized, pad_x, pad_y, round(pad_x), round(pad_y)
+
+
+def letterbox_tensor(image: Image.Image, imgsz: int) -> tuple[torch.Tensor, float, float, float]:
+    width, height = image.size
+    scale, resized, pad_x, pad_y, paste_x, paste_y = letterbox_geometry(width, height, imgsz)
+    canvas = Image.new("RGB", (imgsz, imgsz), (0, 0, 0))
+    resized_image = image.resize(resized, Image.Resampling.BILINEAR)
+    canvas.paste(resized_image, (paste_x, paste_y))
     array = np.asarray(canvas, dtype=np.float32) / 255.0
     tensor = torch.from_numpy(array).permute(2, 0, 1).contiguous()
     return tensor, scale, pad_x, pad_y
 
 
+def letterbox_tensor_and_valid_mask(image: Image.Image, imgsz: int) -> tuple[torch.Tensor, float, float, float, torch.Tensor]:
+    width, height = image.size
+    scale, resized, pad_x, pad_y, paste_x, paste_y = letterbox_geometry(width, height, imgsz)
+    tensor, _, _, _ = letterbox_tensor(image, imgsz)
+    valid_mask = torch.zeros((1, int(imgsz), int(imgsz)), dtype=torch.float32)
+    x2 = min(paste_x + resized[0], int(imgsz))
+    y2 = min(paste_y + resized[1], int(imgsz))
+    valid_mask[:, max(paste_y, 0):y2, max(paste_x, 0):x2] = 1.0
+    return tensor, scale, pad_x, pad_y, valid_mask
+
+
 def collate_batch(items: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "image": torch.stack([item["image"] for item in items]),
+        "valid_mask": torch.stack([item["valid_mask"] for item in items]),
         "keypoints": torch.stack([item["keypoints"] for item in items]),
         "keypoint_mask": torch.stack([item["keypoint_mask"] for item in items]),
         "hard_negative_points": torch.stack([item["hard_negative_points"] for item in items]),
@@ -171,8 +210,8 @@ def collate_batch(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def load_hard_negative_predictions(paths: list[Path], *, min_confidence: float) -> dict[str, list[dict[str, float]]]:
-    rows_by_stem: dict[str, list[dict[str, float]]] = {}
+def load_hard_negative_predictions(paths: list[Path], *, min_confidence: float) -> dict[str, list[dict[str, Any]]]:
+    rows_by_stem: dict[str, list[dict[str, Any]]] = {}
     for path in paths:
         if not path.exists():
             raise FileNotFoundError(f"Hard-negative prediction JSONL not found: {path}")
@@ -191,16 +230,32 @@ def load_hard_negative_predictions(paths: list[Path], *, min_confidence: float) 
             if not coords:
                 continue
             direction = _prediction_direction(keypoints)
+            padding_px = _prediction_padding_px(record)
+            coordinate_space = "cropped" if padding_px > 0.0 else "image"
             stems = {
                 Path(str(record[field])).stem
-                for field in ("source", "original_source")
+                for field in ("dinov3_source", "cropped_source", "source", "original_source")
                 if record.get(field)
             }
             for stem in stems:
                 rows = rows_by_stem.setdefault(stem, [])
                 for x, y, conf in coords:
-                    rows.append({"x": x, "y": y, "conf": conf, "dx": direction[0], "dy": direction[1]})
+                    rows.append(
+                        {
+                            "x": x - padding_px if coordinate_space == "cropped" else x,
+                            "y": y - padding_px if coordinate_space == "cropped" else y,
+                            "conf": conf,
+                            "dx": direction[0],
+                            "dy": direction[1],
+                            "coordinate_space": coordinate_space,
+                        }
+                    )
     return rows_by_stem
+
+
+def _prediction_padding_px(record: dict[str, Any]) -> float:
+    preprocess = record.get("preprocess") or {}
+    return float(preprocess.get("padding_px") or 0.0)
 
 
 def _prediction_direction(keypoints: list[list[float]]) -> tuple[float, float]:
@@ -283,6 +338,7 @@ def run_epoch(
 
     for batch in loader:
         images = batch["image"].to(device, non_blocking=True)
+        content_valid_mask = batch["valid_mask"].to(device, non_blocking=True)
         keypoints = batch["keypoints"].to(device, non_blocking=True)
         keypoint_mask = batch["keypoint_mask"].to(device, non_blocking=True)
         hard_negative_points = batch["hard_negative_points"].to(device, non_blocking=True)
@@ -294,7 +350,7 @@ def run_epoch(
         with torch.no_grad():
             feature_map, global_feature = extractor.forward_dense(normalize_for_dinov3(images, aux_cfg))
         valid_mask_map = (
-            foreground_mask_from_images(images, luma_floor=aux_cfg.valid_mask_luma_floor)
+            content_valid_mask * foreground_mask_from_images(images, luma_floor=aux_cfg.valid_mask_luma_floor)
             if aux_cfg.include_valid_mask
             else None
         )
@@ -395,8 +451,14 @@ def main() -> None:
         hard_negative_points=aux_cfg.hard_negative_points,
         hard_negative_min_confidence=aux_cfg.hard_negative_min_confidence,
         hard_negative_min_distance=aux_cfg.hard_negative_min_distance,
+        crop_black_border_luma_floor=aux_cfg.crop_black_border_luma_floor,
     )
-    val_dataset = YoloPoseAuxDataset(data_path, "val", int(cfg["imgsz"]))
+    val_dataset = YoloPoseAuxDataset(
+        data_path,
+        "val",
+        int(cfg["imgsz"]),
+        crop_black_border_luma_floor=aux_cfg.crop_black_border_luma_floor,
+    )
     train_loader = DataLoader(
         train_dataset,
         batch_size=int(cfg["batch"]),

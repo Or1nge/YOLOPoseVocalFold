@@ -12,9 +12,9 @@ The auxiliary scorer uses DINOv3 as a dense feature encoder and trains only a
 small point head on top:
 
 ```text
-image -> frozen DINOv3 dense features
+no-black/cropped image -> frozen DINOv3 dense features
       -> oriented patch around candidate point
-      -> foreground-valid mask for the same oriented patch
+      -> content-valid mask for the same oriented patch
       -> point head: background / anterior / left posterior / right posterior
 ```
 
@@ -24,18 +24,24 @@ near-miss locations around annotated keypoints, and mined high-confidence
 YOLO-Pose candidate points on empty-label mixed images. L/R are separate
 classes and are not treated as each other's positive samples.
 
-The current implementation does not crop the full DINO input before encoding.
-It uses the image path supplied by the training dataset or prediction JSONL,
-then letterboxes that image to the DINO input size. At inference, the scorer
-chooses `source` before `original_source`, so LDP holdout predictions scored
-from V1.1 ROI outputs use the generated blackpad input image.
+The current implementation crops existing black borders before DINO encoding.
+ROI prediction must feed YOLO-Pose with a uniform black-padded image after that
+crop, while the prediction JSONL records the shared preprocess metadata contract:
+`type=crop_black_border_then_blackpad`, `crop_bbox_xyxy`, `crop_was_applied`,
+`cropped_source`, `padding_px`, `model_input_width/height`, and
+`no_black_bbox_in_model_input`. It also keeps `dinov3_source` as an alias to the
+cropped no-black image. During scoring, YOLO padded keypoints are transformed
+into this cropped coordinate space by subtracting `preprocess.padding_px`; if
+the cropped file is missing, the scorer can remove the padding from `source` or
+crop `original_source` from the stored crop bbox.
 
-To reduce local border contamination without changing the full-image DINO
-input, the point head is mask-aware. A foreground-valid mask is built from the
-same letterboxed DINO input using a low luma floor. The oriented 48x48 point
-region samples both DINO features and the mask; invalid black-border locations
-are zeroed in the local feature patch, and the mask itself is appended as an
-extra local channel for the head.
+The point head remains mask-aware, but the mask now represents real content
+coverage rather than only black-pixel foreground. The letterboxed DINO content
+rectangle is sampled with the same oriented 48x48 grid as the DINO features.
+Out-of-image samples are not clamped to the image edge; they become invalid mask
+cells and zero-valued local features. The old luma-floor foreground mask can be
+combined with this content mask, but incomplete patch area is handled even when
+the cropped image itself contains no black border pixels.
 
 ## Commands
 

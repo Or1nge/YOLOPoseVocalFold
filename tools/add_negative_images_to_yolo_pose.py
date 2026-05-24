@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--blackpad-negatives",
         action="store_true",
-        help="Apply the V1.1 black-border preprocessing to added negative images.",
+        help="Crop existing black borders and apply the uniform black-border preprocessing to added negative images.",
     )
     parser.add_argument("--blackpad-fraction", type=float, default=0.30)
     parser.add_argument("--blackpad-min-padding", type=int, default=80)

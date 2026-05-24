@@ -37,6 +37,7 @@ class DinoV3AuxConfig:
     include_point_coordinates: bool = False
     include_valid_mask: bool = True
     valid_mask_luma_floor: float = 8.0
+    crop_black_border_luma_floor: float = 8.0
     confidence_gate_mode: str = "reward_only"
     confidence_reject_threshold: float = 0.0
     confidence_penalty_threshold: float = 0.0
@@ -264,7 +265,7 @@ def sample_oriented_point_regions(
         + yy.view(1, 1, output_size, 1, 1) * unit_y[:, :, None, None, :]
     )
     centers = points01[:, :, None, None, :].to(device=feature_map.device, dtype=feature_map.dtype)
-    grid = (centers + offsets).clamp(0.0, 1.0) * 2.0 - 1.0
+    grid = (centers + offsets) * 2.0 - 1.0
     flat_grid = grid.view(batch_size, point_count * output_size, output_size, 2)
     sampled = F.grid_sample(
         feature_map,

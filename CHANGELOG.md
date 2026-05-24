@@ -2,9 +2,12 @@
 
 ## Unreleased
 
+- Changed ROI prediction preprocessing to required `V1.2`: crop existing black borders first, then always add the uniform black border before YOLO-Pose; prediction JSONL now records the shared preprocess metadata contract including `crop_bbox_xyxy`, `crop_was_applied`, `cropped_source`, `padding_fraction`, `model_input_width/height`, and `no_black_bbox_in_model_input`.
+- Updated DINOv3 auxiliary scoring to read no-black/cropped images before padded `source`, transform YOLO padded keypoints back into cropped coordinates, and keep the auxiliary score available for final confidence/action gating.
+- Changed DINOv3 valid-mask sampling so out-of-image oriented patch locations are not clamped to edge pixels; incomplete 48x48 point patches now carry invalid mask cells and zeroed features.
 - Started `exp/dinov3-keypoint-aux` as a replacement direction for keypoint-local contrast.
 - Narrowed the frozen-DINOv3 auxiliary scorer to oriented point-region `background/A/L/R` classification with mined hard negatives and a reward-only confidence gate: `0.30-0.60` linearly rewards up to `1.5x`, very high scores can directly pass, and low DINO scores no longer directly reject.
-- Added foreground-valid mask support to DINOv3 oriented point-region patches so local black-border pixels are zeroed and exposed to the point head as a mask channel without cropping the full DINO input image.
+- Added valid-mask support to DINOv3 oriented point-region patches so invalid local cells are zeroed and exposed to the point head as a mask channel.
 - Added training and prediction-scoring entrypoints: `tools/train_dinov3_keypoint_aux.py` and `tools/score_predictions_with_dinov3_aux.py`.
 - Added DINOv3 auxiliary configs, design notes, and unit tests.
 - Completed the three-stage oriented contrast run with 200 random blackpadded

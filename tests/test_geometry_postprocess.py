@@ -300,3 +300,23 @@ def test_effective_area_from_metadata_uses_model_input_foreground_bbox(tmp_path)
     assert area == 36.0
     assert bbox == (7.0, 8.0, 13.0, 14.0)
     assert mode == "input_foreground_bbox"
+
+
+def test_effective_area_from_metadata_uses_preprocess_no_black_content() -> None:
+    area, bbox, mode = effective_area_from_metadata(
+        {
+            "source": "not_needed.png",
+            "preprocess": {
+                "type": "crop_black_border_then_blackpad",
+                "padding_px": 10,
+                "cropped_width": 60,
+                "cropped_height": 40,
+                "no_black_bbox_in_model_input": [10, 10, 70, 50],
+            },
+        },
+        PostprocessConfig(roi_dark_foreground_luma_floor=8.0),
+    )
+
+    assert area == 2400.0
+    assert bbox == (10.0, 10.0, 70.0, 50.0)
+    assert mode == "preprocess_no_black_content"

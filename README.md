@@ -234,7 +234,7 @@ image -> frozen DINOv3 dense features
       -> oriented point-region head: background / anterior / left posterior / right posterior
 ```
 
-左后方和右后方不被当作彼此的正样本；病变造成的不对称性应被保留。DINOv3 只提供高维局部语义特征，三点监督仍来自人工 YOLO-Pose 标签。当前 active 版本只训练点区域四分类，不再训练 triplet head 或 image reject head；hard negative 来自排除 holdout 后的混杂图误检点和关键点邻域 near-miss 背景。DINO 输入不额外裁黑边；训练/打分使用数据集或 prediction JSONL 给出的图像路径，再 letterbox 到 DINO 输入尺寸。点区域 head 会同时采样一张有效像素 mask，让 48x48 有向局部 patch 中的黑边区域不作为正常组织特征参与判断。
+左后方和右后方不被当作彼此的正样本；病变造成的不对称性应被保留。DINOv3 只提供高维局部语义特征，三点监督仍来自人工 YOLO-Pose 标签。当前 active 版本只训练点区域四分类，不再训练 triplet head 或 image reject head；hard negative 来自排除 holdout 后的混杂图误检点和关键点邻域 near-miss 背景。DINO 训练/打分改为看裁掉已有黑边后的 no-black/cropped 图像；prediction JSONL 会优先提供 `dinov3_source`/`cropped_source`，DINO 评分时把 YOLO padded 坐标减去 `preprocess.padding_px` 后再采样。点区域 head 会同时采样一张有效像素 mask，让 48x48 有向局部 patch 中的 letterbox padding、超出真实图像边界的位置，以及可选 luma-floor 黑区不作为正常组织特征参与判断。
 
 默认配置用 `timm/vit_small_patch16_dinov3.lvd1689m` 这份公开 DINOv3 ViT-S/16 权重。官方 `facebook/dinov3-vits16-pretrain-lvd1689m` 仓库是 gated；如果已经获得访问权限，也可以把 `dinov3.backend` 改成 `transformers` 并使用官方模型 id。
 
@@ -267,7 +267,7 @@ python tools/score_predictions_with_dinov3_aux.py \
 
 ## 推理
 
-当前推荐 ROI 定位算法版本为 `V1.1`：使用 `vf_roi_v1` 权重，并在每张输入图像进入模型前自动增加四周黑边。
+当前推荐 ROI 定位算法版本为 `V1.2`：使用 `vf_roi_v1` 权重，并在每张输入图像进入模型前先裁掉已有黑边，再对裁后的矩形有效图像自动增加四周统一黑边。
 
 ```text
 Results/models/vf_roi_v1/best.pt
@@ -281,9 +281,9 @@ python tools/predict_roi.py \
   --out Results/predictions/val_predictions.jsonl
 ```
 
-V1.1 的默认前处理会把每张图按长边 30%、最少 80 px 加四周黑边，黑边图写到
-`<out_stem>_blackpad_inputs/`，预测坐标也基于这份黑边图。JSONL 中 `source` 指向黑边图，
-`original_source` 保留原图路径，`preprocess` 记录 padding 和尺寸。仅做消融时可加 `--no-blackpad`。
+V1.2 的预测前处理会先按低亮度前景框裁掉已有黑边，再把裁后图按长边 30%、最少 80 px 加四周黑边；这个 black pad 是 YOLO-Pose 的必经输入步骤。黑边图写到
+`<out_stem>_blackpad_inputs/`，裁后 no-black 图写到 `<out_stem>_cropped_inputs/`，预测坐标基于黑边图。JSONL 中 `source` 指向黑边图，`dinov3_source`/`cropped_source` 指向裁后图，
+`original_source` 保留原图路径，`preprocess.type` 固定为 `crop_black_border_then_blackpad`，并记录原图尺寸、`crop_bbox_xyxy`、是否实际裁剪、裁后尺寸、`padding_px`、padding 规则、`model_input_width/height` 和 `no_black_bbox_in_model_input`。DINO 后续只使用 `dinov3_source`/`cropped_source` 对应的 no-black 图，按 `padding_px` 把 YOLO keypoints 转回 cropped 坐标。
 目录或列表输入会逐张流式推理并逐行写出 JSONL，避免大批量路径一次性送入 YOLO 时占满显存。
 
 固定 JSONL holdout/manifest 推理可用 `--manifest`，脚本会优先读取每行的 `original_source`、`source_key`、`source`：
@@ -308,6 +308,7 @@ python tools/summarize_ldp_holdout_predictions.py \
 - `bbox_yolo`
 - `bbox_keypoints`
 - `original_source`
+- `dinov3_source` / `cropped_source`
 - `preprocess`
 - `roi_polygon`: 由 3 点生成的角平分线旋转 ROI
 - `final_box_polygon`: 最终四点旋转框；一条边平行于前联合夹角的角平分线，左右宽度按两侧后方点到角平分线的投影分别扩张

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -14,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from tools.train_dinov3_keypoint_aux import letterbox_tensor  # noqa: E402
+from tools.train_dinov3_keypoint_aux import letterbox_tensor_and_valid_mask  # noqa: E402
 from yoloposevf.dinov3_aux import (  # noqa: E402
     DinoV3AuxConfig,
     DinoV3KeypointAuxHead,
@@ -24,6 +25,19 @@ from yoloposevf.dinov3_aux import (  # noqa: E402
     score_aux_triplet,
 )
 from yoloposevf.postprocess import decide_action, load_postprocess_config  # noqa: E402
+
+
+DINO_SOURCE_FIELDS = ("dinov3_source", "cropped_source", "no_black_source")
+
+
+@dataclass
+class DinoV3PredictionInput:
+    image: Image.Image
+    keypoints: list[list[float]]
+    image_source: str
+    image_source_field: str
+    padding_px: float
+    warnings: list[str]
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,19 +99,189 @@ def device_from_arg(value: str) -> torch.device:
     return torch.device(value)
 
 
-def prediction_image_path(record: dict[str, Any]) -> Path | None:
-    for field in ("source", "original_source"):
-        value = record.get(field)
-        if value and Path(str(value)).exists():
-            return Path(str(value))
-    return None
-
-
 def prediction_keypoints(record: dict[str, Any]) -> list[list[float]] | None:
     rows = record.get("keypoints")
     if not rows or len(rows) < 3:
         return None
     return [[float(value) for value in row[:3]] for row in rows[:3]]
+
+
+def preprocess_padding_px(record: dict[str, Any]) -> float:
+    preprocess = record.get("preprocess") or {}
+    return float(preprocess.get("padding_px") or 0.0)
+
+
+def preprocess_crop_bbox(record: dict[str, Any]) -> tuple[int, int, int, int] | None:
+    preprocess = record.get("preprocess") or {}
+    bbox = preprocess.get("crop_bbox_xyxy")
+    if bbox and len(bbox) == 4:
+        return tuple(int(round(float(value))) for value in bbox)
+    keys = ("crop_left", "crop_top", "crop_right", "crop_bottom")
+    if all(key in preprocess for key in keys):
+        return tuple(int(round(float(preprocess[key]))) for key in keys)
+    return None
+
+
+def expected_cropped_size(record: dict[str, Any]) -> tuple[int, int] | None:
+    preprocess = record.get("preprocess") or {}
+    width = int(round(float(preprocess.get("no_black_width") or preprocess.get("cropped_width") or 0)))
+    height = int(round(float(preprocess.get("no_black_height") or preprocess.get("cropped_height") or 0)))
+    if width > 0 and height > 0:
+        return width, height
+    bbox = preprocess_crop_bbox(record)
+    if bbox is None:
+        return None
+    left, top, right, bottom = bbox
+    return max(right - left, 0), max(bottom - top, 0)
+
+
+def keypoints_yolo_padded_to_cropped(
+    keypoints: Sequence[Sequence[float]],
+    *,
+    padding_px: float,
+) -> list[list[float]]:
+    transformed: list[list[float]] = []
+    for row in keypoints[:3]:
+        transformed.append([float(row[0]) - padding_px, float(row[1]) - padding_px, float(row[2])])
+    return transformed
+
+
+def _append_consistency_warnings(
+    warnings: list[str],
+    *,
+    image_size: tuple[int, int],
+    keypoints: Sequence[Sequence[float]],
+    expected_size: tuple[int, int] | None,
+) -> None:
+    width, height = image_size
+    if expected_size is not None and tuple(expected_size) != (width, height):
+        warnings.append("dinov3_image_size_mismatch")
+    outside = any(float(kp[0]) < 0.0 or float(kp[1]) < 0.0 or float(kp[0]) > width or float(kp[1]) > height for kp in keypoints)
+    if outside:
+        warnings.append("dinov3_keypoints_outside_cropped_image")
+
+
+def resolve_dinov3_prediction_input(record: dict[str, Any]) -> DinoV3PredictionInput | None:
+    keypoints = prediction_keypoints(record)
+    if keypoints is None:
+        return None
+    padding_px = preprocess_padding_px(record)
+    cropped_keypoints = keypoints_yolo_padded_to_cropped(keypoints, padding_px=padding_px)
+    expected_size = expected_cropped_size(record)
+
+    for field in DINO_SOURCE_FIELDS:
+        value = record.get(field)
+        if not value:
+            continue
+        path = Path(str(value))
+        if not path.exists():
+            continue
+        image = Image.open(path).convert("RGB")
+        warnings: list[str] = []
+        _append_consistency_warnings(
+            warnings,
+            image_size=image.size,
+            keypoints=cropped_keypoints,
+            expected_size=expected_size,
+        )
+        return DinoV3PredictionInput(
+            image=image,
+            keypoints=cropped_keypoints,
+            image_source=str(path),
+            image_source_field=field,
+            padding_px=padding_px,
+            warnings=warnings,
+        )
+
+    source_value = record.get("source")
+    source_path = Path(str(source_value)) if source_value else None
+    if source_path is not None and source_path.exists() and padding_px > 0.0:
+        source_image = Image.open(source_path).convert("RGB")
+        width, height = source_image.size
+        left = int(round(padding_px))
+        top = int(round(padding_px))
+        right = int(round(width - padding_px))
+        bottom = int(round(height - padding_px))
+        if right > left and bottom > top:
+            image = source_image.crop((left, top, right, bottom))
+            warnings = []
+            _append_consistency_warnings(
+                warnings,
+                image_size=image.size,
+                keypoints=cropped_keypoints,
+                expected_size=expected_size,
+            )
+            return DinoV3PredictionInput(
+                image=image,
+                keypoints=cropped_keypoints,
+                image_source=f"{source_path}#padding_removed",
+                image_source_field="source_minus_padding",
+                padding_px=padding_px,
+                warnings=warnings,
+            )
+
+    original_value = record.get("original_source")
+    original_path = Path(str(original_value)) if original_value else None
+    crop_bbox = preprocess_crop_bbox(record)
+    if original_path is not None and original_path.exists() and crop_bbox is not None:
+        image = Image.open(original_path).convert("RGB").crop(crop_bbox)
+        warnings = []
+        _append_consistency_warnings(
+            warnings,
+            image_size=image.size,
+            keypoints=cropped_keypoints,
+            expected_size=expected_size,
+        )
+        return DinoV3PredictionInput(
+            image=image,
+            keypoints=cropped_keypoints,
+            image_source=f"{original_path}#crop_bbox",
+            image_source_field="original_source_crop_bbox",
+            padding_px=padding_px,
+            warnings=warnings,
+        )
+
+    if original_path is not None and original_path.exists() and padding_px > 0.0:
+        image = Image.open(original_path).convert("RGB")
+        warnings = []
+        _append_consistency_warnings(
+            warnings,
+            image_size=image.size,
+            keypoints=cropped_keypoints,
+            expected_size=expected_size,
+        )
+        return DinoV3PredictionInput(
+            image=image,
+            keypoints=cropped_keypoints,
+            image_source=str(original_path),
+            image_source_field="original_source",
+            padding_px=padding_px,
+            warnings=warnings,
+        )
+
+    for field in ("source", "original_source"):
+        value = record.get(field)
+        if not value:
+            continue
+        path = Path(str(value))
+        if path.exists():
+            image = Image.open(path).convert("RGB")
+            warnings = []
+            _append_consistency_warnings(
+                warnings,
+                image_size=image.size,
+                keypoints=keypoints,
+                expected_size=None,
+            )
+            return DinoV3PredictionInput(
+                image=image,
+                keypoints=keypoints,
+                image_source=str(path),
+                image_source_field=field,
+                padding_px=0.0,
+                warnings=warnings,
+            )
+    return None
 
 
 def letterbox_keypoints(
@@ -121,19 +305,18 @@ def letterbox_keypoints(
 def attach_aux_score(
     record: dict[str, Any],
     *,
-    image_path: Path,
-    keypoints: Sequence[Sequence[float]],
+    dinov3_input: DinoV3PredictionInput,
     extractor: Any,
     head: DinoV3KeypointAuxHead,
     aux_cfg: DinoV3AuxConfig,
     device: torch.device,
     imgsz: int,
 ) -> dict[str, Any]:
-    image = Image.open(image_path).convert("RGB")
+    image = dinov3_input.image
     width, height = image.size
-    image_tensor, scale, pad_x, pad_y = letterbox_tensor(image, imgsz)
+    image_tensor, scale, pad_x, pad_y, content_valid_mask = letterbox_tensor_and_valid_mask(image, imgsz)
     points = letterbox_keypoints(
-        keypoints,
+        dinov3_input.keypoints,
         width=width,
         height=height,
         scale=scale,
@@ -145,7 +328,7 @@ def attach_aux_score(
         images = image_tensor[None].to(device)
         feature_map, global_feature = extractor.forward_dense(normalize_for_dinov3(images, aux_cfg))
         valid_mask_map = (
-            foreground_mask_from_images(images, luma_floor=aux_cfg.valid_mask_luma_floor)
+            content_valid_mask[None].to(device) * foreground_mask_from_images(images, luma_floor=aux_cfg.valid_mask_luma_floor)
             if aux_cfg.include_valid_mask
             else None
         )
@@ -189,8 +372,15 @@ def attach_aux_score(
         "reward_threshold": aux_cfg.confidence_reward_threshold,
         "direct_accept_threshold": aux_cfg.confidence_direct_accept_threshold,
         "reward_multiplier": aux_cfg.confidence_reward_multiplier,
-        "image_source": str(image_path),
+        "image_source": dinov3_input.image_source,
+        "image_source_field": dinov3_input.image_source_field,
+        "keypoint_coordinate_space": "dinov3_cropped",
+        "keypoint_padding_subtracted_px": dinov3_input.padding_px,
+        "dinov3_image_size": {"width": width, "height": height},
     }
+    if dinov3_input.warnings:
+        record["dinov3_aux"]["warnings"] = dinov3_input.warnings
+        record.setdefault("flags", []).extend(dinov3_input.warnings)
     return record
 
 
@@ -259,15 +449,13 @@ def main() -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", encoding="utf-8") as handle:
         for record in records:
-            image_path = prediction_image_path(record)
-            keypoints = prediction_keypoints(record)
-            if image_path is None or keypoints is None:
+            dinov3_input = resolve_dinov3_prediction_input(record)
+            if dinov3_input is None:
                 skipped += 1
             else:
                 record = attach_aux_score(
                     record,
-                    image_path=image_path,
-                    keypoints=keypoints,
+                    dinov3_input=dinov3_input,
                     extractor=extractor,
                     head=head,
                     aux_cfg=aux_cfg,
