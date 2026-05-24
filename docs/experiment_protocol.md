@@ -83,9 +83,11 @@ pytest tests/test_keypoint_contrast.py
 
 - 不把同一图的左后方和右后方当作正样本；左右病变差异不能被镜像假设抹平。
 - 冻结 DINOv3 dense encoder，只训练轻量 head。
-- point head 预测 `background / anterior / left posterior / right posterior`。
-- triplet head 判断有序 `A/L/R` 三点组合是否合理，负样本来自同图三点的 swap、jitter 或随机替换。
-- image head 作为弱 reject 辅助，区分有声门三点标签图和空标签混杂图。
+- point-region head 预测有向局部区域属于 `background / anterior / left posterior / right posterior`。
+- 当前 active 版本不训练 triplet head 或 image-level reject head。
+- hard negative 来自排除 holdout 后的混杂图误检点，以及人工关键点附近的 near-miss background。
+- DINO 输入图不做额外裁黑边；训练/推理使用当前数据集或 prediction JSONL 的图像路径，再 letterbox 到 DINO 输入尺寸。
+- 点区域 head 采样同一有向 48x48 局部区域的有效像素 mask，黑边/无效位置在局部特征中被置零，mask 本身也作为局部输入提供给 head。
 
 当前实现：
 
@@ -102,7 +104,7 @@ python tools/train_dinov3_keypoint_aux.py --config configs/train_dinov3_keypoint
 pytest tests/test_dinov3_keypoint_aux.py
 ```
 
-默认打分入口只追加 `dinov3_aux` 字段，不改变已有 `final_confidence/action`。只有显式加 `--apply-confidence-gate` 时，才把 DINOv3 auxiliary factor 乘到 `final_confidence` 上。
+默认打分入口只追加 `dinov3_aux` 字段，不改变已有 `final_confidence/action`。只有显式加 `--apply-confidence-gate` 时，才把 DINOv3 auxiliary factor 应用到 `final_confidence/action`。当前 gate：低于 `0.30` 不动，`0.30-0.60` 按比例从 `1.0x` 奖励到 `1.5x`，`>=0.60` 作为 DINO 极高分直接通过候选；DINO 低分不再直接拒绝。
 
 ### 历史 LDP pseudo 两阶段数据设计
 

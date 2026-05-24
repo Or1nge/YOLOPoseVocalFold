@@ -18,6 +18,7 @@ from tools.train_dinov3_keypoint_aux import letterbox_tensor  # noqa: E402
 from yoloposevf.dinov3_aux import (  # noqa: E402
     DinoV3AuxConfig,
     DinoV3KeypointAuxHead,
+    foreground_mask_from_images,
     load_dinov3_extractor,
     normalize_for_dinov3,
     score_aux_triplet,
@@ -54,6 +55,28 @@ def load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def load_aux_config_from_checkpoint(checkpoint: dict[str, Any]) -> DinoV3AuxConfig:
+    cfg = checkpoint["config"]
+    dinov3 = dict(cfg["dinov3"])
+    defaults = DinoV3AuxConfig()
+    dinov3.setdefault("include_valid_mask", False)
+    gate_keys = (
+        "confidence_gate_mode",
+        "confidence_reject_threshold",
+        "confidence_penalty_threshold",
+        "confidence_reward_threshold",
+        "confidence_direct_accept_threshold",
+        "confidence_reward_multiplier",
+    )
+    if "confidence_gate_mode" not in dinov3:
+        for key in gate_keys:
+            dinov3[key] = getattr(defaults, key)
+    else:
+        for key in gate_keys:
+            dinov3.setdefault(key, getattr(defaults, key))
+    return DinoV3AuxConfig(**dinov3)
 
 
 def device_from_arg(value: str) -> torch.device:
@@ -121,17 +144,33 @@ def attach_aux_score(
     with torch.no_grad():
         images = image_tensor[None].to(device)
         feature_map, global_feature = extractor.forward_dense(normalize_for_dinov3(images, aux_cfg))
+        valid_mask_map = (
+            foreground_mask_from_images(images, luma_floor=aux_cfg.valid_mask_luma_floor)
+            if aux_cfg.include_valid_mask
+            else None
+        )
         scores = score_aux_triplet(
             head,
             feature_map,
             global_feature,
             points[None].to(device),
+            patch_size_input=aux_cfg.oriented_patch_size_input,
+            input_size=imgsz,
             score_mode=aux_cfg.score_mode,
+            gate_mode=aux_cfg.confidence_gate_mode,
+            reject_threshold=aux_cfg.confidence_reject_threshold,
+            penalty_threshold=aux_cfg.confidence_penalty_threshold,
+            reward_threshold=aux_cfg.confidence_reward_threshold,
+            direct_accept_threshold=aux_cfg.confidence_direct_accept_threshold,
+            reward_multiplier=aux_cfg.confidence_reward_multiplier,
+            valid_mask_map=valid_mask_map,
         )
     point_probs = scores["point_expected_probs"][0].detach().cpu().tolist()
-    triplet_prob = float(scores["triplet_valid_prob"][0].detach().cpu())
-    image_reject_prob = float(scores["image_reject_prob"][0].detach().cpu())
+    point_region_score = float(scores["point_region_score"][0].detach().cpu())
     confidence_factor = float(scores["confidence_factor"][0].detach().cpu())
+    direct_accept = bool(scores["direct_accept"][0].detach().cpu())
+    hard_reject = bool(scores["hard_reject"][0].detach().cpu())
+    valid_fraction = float(scores["valid_fraction"][0].detach().cpu())
     record["dinov3_aux"] = {
         "point_expected_probs": {
             "anterior": point_probs[0],
@@ -139,9 +178,17 @@ def attach_aux_score(
             "right_posterior": point_probs[2],
         },
         "min_point_expected_prob": float(min(point_probs)),
-        "triplet_valid_prob": triplet_prob,
-        "image_reject_prob": image_reject_prob,
+        "point_region_score": point_region_score,
         "confidence_factor": confidence_factor,
+        "direct_accept": direct_accept,
+        "hard_reject": hard_reject,
+        "valid_fraction": valid_fraction,
+        "gate_mode": aux_cfg.confidence_gate_mode,
+        "reject_threshold": aux_cfg.confidence_reject_threshold,
+        "penalty_threshold": aux_cfg.confidence_penalty_threshold,
+        "reward_threshold": aux_cfg.confidence_reward_threshold,
+        "direct_accept_threshold": aux_cfg.confidence_direct_accept_threshold,
+        "reward_multiplier": aux_cfg.confidence_reward_multiplier,
         "image_source": str(image_path),
     }
     return record
@@ -160,16 +207,22 @@ def maybe_apply_gate(
         return record
     old_conf = float(record.get("final_confidence", 0.0))
     factor = float(aux.get("confidence_factor", 1.0))
+    direct_accept = bool(aux.get("direct_accept", False))
+    hard_reject = bool(aux.get("hard_reject", False))
     record["pre_dinov3_aux_confidence"] = old_conf
     record["final_confidence"] = max(0.0, min(1.0, old_conf * factor))
-    flags = record.setdefault("flags", [])
-    if float(aux.get("min_point_expected_prob", 0.0)) < min_point_prob:
-        flags.append("dinov3_low_point_probability")
-    if float(aux.get("triplet_valid_prob", 0.0)) < min_triplet_prob:
-        flags.append("dinov3_low_triplet_probability")
-    if float(aux.get("image_reject_prob", 1.0)) > max_image_reject_prob:
-        flags.append("dinov3_high_image_reject_probability")
-    record["action"] = decide_action(float(record["final_confidence"]), postprocess_cfg)
+    if hard_reject:
+        record["final_confidence"] = 0.0
+        record["action"] = "reject_or_relabel"
+        record["dinov3_aux_gate_action"] = "hard_reject"
+        record.setdefault("flags", []).append("dinov3_very_low_point_probability")
+    elif direct_accept:
+        record["dinov3_aux_gate_action"] = "direct_accept"
+        record["final_confidence"] = max(float(record["final_confidence"]), float(postprocess_cfg.auto_accept_threshold))
+        record["action"] = "auto_accept"
+    else:
+        record["dinov3_aux_gate_action"] = "reward" if factor > 1.0 else "none"
+        record["action"] = decide_action(float(record["final_confidence"]), postprocess_cfg)
     if record["action"] == "reject_or_relabel":
         record["usable_bbox"] = None
         record["usable_box_polygon"] = None
@@ -184,16 +237,17 @@ def main() -> None:
     device = device_from_arg(args.device)
     checkpoint = torch.load(args.aux_checkpoint, map_location="cpu")
     cfg = checkpoint["config"]
-    aux_cfg = DinoV3AuxConfig(**cfg["dinov3"])
+    aux_cfg = load_aux_config_from_checkpoint(checkpoint)
     imgsz = int(args.imgsz or cfg.get("imgsz", 960))
     extractor = load_dinov3_extractor(aux_cfg, device)
     for parameter in extractor.parameters():
         parameter.requires_grad_(False)
     head = DinoV3KeypointAuxHead(
         int(checkpoint["feature_dim"]),
+        patch_output_size=aux_cfg.oriented_patch_output_size,
         point_hidden_dim=aux_cfg.point_hidden_dim,
-        triplet_hidden_dim=aux_cfg.triplet_hidden_dim,
-        image_hidden_dim=aux_cfg.image_hidden_dim,
+        include_coordinates=aux_cfg.include_point_coordinates,
+        include_valid_mask=aux_cfg.include_valid_mask,
     ).to(device)
     head.load_state_dict(checkpoint["head"])
     head.eval()

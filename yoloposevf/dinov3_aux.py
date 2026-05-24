@@ -12,7 +12,7 @@ import torch.nn.functional as F
 
 @dataclass(frozen=True)
 class DinoV3AuxConfig:
-    """Configuration for the frozen-DINOv3 keypoint plausibility head."""
+    """Configuration for the frozen-DINOv3 point-region classifier."""
 
     backend: str = "timm"
     model_name: str = "dinov3_vits16"
@@ -23,74 +23,74 @@ class DinoV3AuxConfig:
     image_mean: tuple[float, float, float] = (0.485, 0.456, 0.406)
     image_std: tuple[float, float, float] = (0.229, 0.224, 0.225)
     point_hidden_dim: int = 256
-    triplet_hidden_dim: int = 512
-    image_hidden_dim: int = 256
-    background_points: int = 12
-    corrupted_triplets: int = 3
+    background_points: int = 3
+    near_background_points: int = 0
+    hard_negative_points: int = 3
     point_loss_weight: float = 1.0
-    triplet_loss_weight: float = 1.0
-    image_loss_weight: float = 0.20
-    corrupted_jitter: float = 0.10
     min_background_distance: float = 0.08
+    near_background_min_distance: float = 0.06
+    near_background_max_distance: float = 0.18
+    hard_negative_min_confidence: float = 0.30
+    hard_negative_min_distance: float = 0.08
+    oriented_patch_size_input: float | tuple[float, float] = 48.0
+    oriented_patch_output_size: int = 5
+    include_point_coordinates: bool = False
+    include_valid_mask: bool = True
+    valid_mask_luma_floor: float = 8.0
+    confidence_gate_mode: str = "reward_only"
+    confidence_reject_threshold: float = 0.0
+    confidence_penalty_threshold: float = 0.0
+    confidence_reward_threshold: float = 0.30
+    confidence_direct_accept_threshold: float = 0.60
+    confidence_reward_multiplier: float = 1.50
     score_mode: str = "geometric_mean"
 
 
 class DinoV3KeypointAuxHead(nn.Module):
-    """Small trainable head on top of frozen DINOv3 dense features.
-
-    The point branch predicts 4 classes: background, anterior, left posterior,
-    right posterior. The triplet branch predicts whether an ordered A/L/R triplet
-    is anatomically plausible. L/R are never treated as positive pairs.
-    """
+    """Small trainable point head on top of frozen DINOv3 dense features."""
 
     def __init__(
         self,
         feature_dim: int,
         *,
+        patch_output_size: int = 5,
         point_hidden_dim: int = 256,
-        triplet_hidden_dim: int = 512,
-        image_hidden_dim: int = 256,
+        include_coordinates: bool = False,
+        include_valid_mask: bool = False,
     ) -> None:
         super().__init__()
         self.feature_dim = int(feature_dim)
+        self.patch_output_size = int(patch_output_size)
+        self.include_coordinates = bool(include_coordinates)
+        self.include_valid_mask = bool(include_valid_mask)
+        point_input_dim = self.feature_dim * self.patch_output_size * self.patch_output_size
+        if self.include_valid_mask:
+            point_input_dim += self.patch_output_size * self.patch_output_size
+        if self.include_coordinates:
+            point_input_dim += 2
         self.point_mlp = nn.Sequential(
-            nn.Linear(self.feature_dim + 2, int(point_hidden_dim)),
+            nn.Linear(point_input_dim, int(point_hidden_dim)),
             nn.ReLU(inplace=True),
             nn.Linear(int(point_hidden_dim), 4),
         )
-        triplet_in = self.feature_dim * 3 + 6 + 6
-        self.triplet_mlp = nn.Sequential(
-            nn.Linear(triplet_in, int(triplet_hidden_dim)),
-            nn.ReLU(inplace=True),
-            nn.Linear(int(triplet_hidden_dim), 2),
-        )
-        self.image_mlp = nn.Sequential(
-            nn.Linear(self.feature_dim, int(image_hidden_dim)),
-            nn.ReLU(inplace=True),
-            nn.Linear(int(image_hidden_dim), 2),
-        )
 
-    def point_logits(self, point_features: torch.Tensor, points01: torch.Tensor) -> torch.Tensor:
-        return self.point_mlp(torch.cat([point_features, points01], dim=-1))
-
-    def triplet_logits(self, triplet_features: torch.Tensor, triplets01: torch.Tensor) -> torch.Tensor:
-        flat_features = triplet_features.flatten(1)
-        flat_points = triplets01.flatten(1)
-        anterior = triplets01[:, 0]
-        left = triplets01[:, 1]
-        right = triplets01[:, 2]
-        rel = torch.cat(
-            [
-                left - anterior,
-                right - anterior,
-                right - left,
-            ],
-            dim=-1,
-        )
-        return self.triplet_mlp(torch.cat([flat_features, flat_points, rel], dim=-1))
-
-    def image_logits(self, global_features: torch.Tensor) -> torch.Tensor:
-        return self.image_mlp(global_features)
+    def point_logits(
+        self,
+        point_features: torch.Tensor,
+        points01: torch.Tensor,
+        valid_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.include_valid_mask:
+            if valid_mask is None:
+                raise ValueError("valid_mask is required when include_valid_mask=True")
+            point_features = point_features * valid_mask.to(device=point_features.device, dtype=point_features.dtype)
+        flat_features = point_features.flatten(2)
+        if self.include_valid_mask:
+            mask_features = valid_mask.to(device=point_features.device, dtype=point_features.dtype).flatten(2)
+            flat_features = torch.cat([flat_features, mask_features], dim=-1)
+        if self.include_coordinates:
+            return self.point_mlp(torch.cat([flat_features, points01], dim=-1))
+        return self.point_mlp(flat_features)
 
 
 class DinoV3DenseExtractor(nn.Module):
@@ -214,24 +214,141 @@ def sample_point_features(feature_map: torch.Tensor, points01: torch.Tensor) -> 
     return sampled.squeeze(-1).transpose(1, 2).contiguous()
 
 
+def anatomy_directions(keypoints01: torch.Tensor, keypoint_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    anterior = keypoints01[:, 0]
+    posterior_mid = 0.5 * (keypoints01[:, 1] + keypoints01[:, 2])
+    direction = posterior_mid - anterior
+    valid = keypoint_mask.bool().all(dim=1)
+    norm = direction.square().sum(dim=-1, keepdim=True).sqrt().clamp_min(1e-6)
+    direction = direction / norm
+    fallback = torch.zeros_like(direction)
+    fallback[:, 1] = 1.0
+    return torch.where(valid[:, None], direction, fallback), valid
+
+
+def sample_oriented_point_regions(
+    feature_map: torch.Tensor,
+    points01: torch.Tensor,
+    directions01: torch.Tensor,
+    *,
+    patch_size_input: float | tuple[float, float] = 48.0,
+    input_size: int = 448,
+    output_size: int = 5,
+) -> torch.Tensor:
+    """Sample canonicalized DINO feature patches around arbitrary points."""
+
+    batch_size, channels, _, _ = feature_map.shape
+    if points01.ndim != 3 or points01.shape[0] != batch_size or points01.shape[-1] != 2:
+        raise ValueError("points01 must have shape [B, N, 2]")
+    if directions01.shape != points01.shape:
+        raise ValueError("directions01 must have the same shape as points01")
+    output_size = int(output_size)
+    if output_size <= 0:
+        raise ValueError("output_size must be positive")
+
+    _, point_count, _ = points01.shape
+    patch_xy = _patch_size_xy(
+        patch_size_input,
+        device=feature_map.device,
+        dtype=feature_map.dtype,
+    ) / max(float(input_size), 1.0)
+    base = torch.linspace(-0.5, 0.5, output_size, device=feature_map.device, dtype=feature_map.dtype)
+    xx = base.view(1, output_size) * patch_xy[0]
+    yy = base.view(output_size, 1) * patch_xy[1]
+    unit_y = directions01.to(device=feature_map.device, dtype=feature_map.dtype)
+    norm = unit_y.square().sum(dim=-1, keepdim=True).sqrt().clamp_min(1e-6)
+    unit_y = unit_y / norm
+    unit_x = torch.stack((-unit_y[..., 1], unit_y[..., 0]), dim=-1)
+    offsets = (
+        xx.view(1, 1, 1, output_size, 1) * unit_x[:, :, None, None, :]
+        + yy.view(1, 1, output_size, 1, 1) * unit_y[:, :, None, None, :]
+    )
+    centers = points01[:, :, None, None, :].to(device=feature_map.device, dtype=feature_map.dtype)
+    grid = (centers + offsets).clamp(0.0, 1.0) * 2.0 - 1.0
+    flat_grid = grid.view(batch_size, point_count * output_size, output_size, 2)
+    sampled = F.grid_sample(
+        feature_map,
+        flat_grid,
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=False,
+    )
+    sampled = sampled.view(batch_size, channels, point_count, output_size, output_size)
+    return sampled.permute(0, 2, 1, 3, 4).contiguous()
+
+
+def sample_oriented_point_region_masks(
+    mask_map: torch.Tensor,
+    points01: torch.Tensor,
+    directions01: torch.Tensor,
+    *,
+    patch_size_input: float | tuple[float, float] = 48.0,
+    input_size: int = 448,
+    output_size: int = 5,
+) -> torch.Tensor:
+    """Sample foreground-valid masks using the same oriented grids as DINO features."""
+
+    if mask_map.ndim != 4 or mask_map.shape[1] != 1:
+        raise ValueError("mask_map must have shape [B, 1, H, W]")
+    return sample_oriented_point_regions(
+        mask_map,
+        points01,
+        directions01,
+        patch_size_input=patch_size_input,
+        input_size=input_size,
+        output_size=output_size,
+    )
+
+
+def foreground_mask_from_images(images: torch.Tensor, *, luma_floor: float = 8.0) -> torch.Tensor:
+    """Build a soft foreground mask from unnormalized RGB image tensors in 0-1 range."""
+
+    if images.ndim != 4 or images.shape[1] != 3:
+        raise ValueError("images must have shape [B, 3, H, W]")
+    rgb = images.clamp(0.0, 1.0)
+    luma = 0.299 * rgb[:, 0:1] + 0.587 * rgb[:, 1:2] + 0.114 * rgb[:, 2:3]
+    floor = max(float(luma_floor), 0.0) / 255.0
+    return (luma > floor).to(dtype=images.dtype)
+
+
+def _patch_size_xy(value: float | tuple[float, float], *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    tensor = torch.as_tensor(value, device=device, dtype=dtype)
+    if tensor.ndim == 0:
+        return tensor.repeat(2)
+    if tensor.ndim == 1 and tensor.numel() == 2:
+        return tensor
+    raise ValueError("oriented_patch_size_input must be a scalar or [x, y]")
+
+
 def build_point_targets(
     keypoints01: torch.Tensor,
     keypoint_mask: torch.Tensor,
     *,
     background_points: int = 12,
+    near_background_points: int = 0,
     min_background_distance: float = 0.08,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    near_background_min_distance: float = 0.06,
+    near_background_max_distance: float = 0.18,
+    hard_negative_points01: torch.Tensor | None = None,
+    hard_negative_mask: torch.Tensor | None = None,
+    hard_negative_directions01: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     batch_size, num_keypoints, _ = keypoints01.shape
     device = keypoints01.device
     dtype = keypoints01.dtype
-    total = num_keypoints + int(background_points)
+    hard_count = 0 if hard_negative_points01 is None else int(hard_negative_points01.shape[1])
+    total = num_keypoints + int(background_points) + int(near_background_points) + hard_count
     points = torch.zeros((batch_size, total, 2), device=device, dtype=dtype)
     labels = torch.zeros((batch_size, total), device=device, dtype=torch.long)
     valid = torch.zeros((batch_size, total), device=device, dtype=torch.bool)
+    directions = torch.zeros((batch_size, total, 2), device=device, dtype=dtype)
+    anatomy_dir, _ = anatomy_directions(keypoints01, keypoint_mask)
     points[:, :num_keypoints] = keypoints01.clamp(0.0, 1.0)
     for kp_index in range(num_keypoints):
         labels[:, kp_index] = kp_index + 1
     valid[:, :num_keypoints] = keypoint_mask.bool()
+    directions[:, :num_keypoints] = anatomy_dir[:, None, :]
+    cursor = num_keypoints
     if background_points > 0:
         backgrounds = sample_background_points(
             keypoints01,
@@ -239,43 +356,40 @@ def build_point_targets(
             count=int(background_points),
             min_distance=float(min_background_distance),
         )
-        points[:, num_keypoints:] = backgrounds
-        labels[:, num_keypoints:] = 0
-        valid[:, num_keypoints:] = True
-    return points, labels, valid
-
-
-def build_triplet_targets(
-    keypoints01: torch.Tensor,
-    keypoint_mask: torch.Tensor,
-    *,
-    corrupted_triplets: int = 3,
-    corrupted_jitter: float = 0.10,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    valid_images = keypoint_mask.bool().all(dim=1)
-    image_indices = valid_images.nonzero(as_tuple=False).flatten()
-    if image_indices.numel() == 0:
-        empty_triplets = keypoints01.new_zeros((0, 3, 2))
-        empty_labels = torch.zeros((0,), device=keypoints01.device, dtype=torch.long)
-        return empty_triplets, empty_labels, empty_labels
-
-    triplets: list[torch.Tensor] = []
-    labels: list[int] = []
-    owners: list[int] = []
-    for image_index in image_indices.tolist():
-        true_triplet = keypoints01[image_index].clamp(0.0, 1.0)
-        triplets.append(true_triplet)
-        labels.append(1)
-        owners.append(image_index)
-        for corrupt_index in range(int(corrupted_triplets)):
-            triplets.append(corrupt_triplet(true_triplet, corrupt_index, jitter=float(corrupted_jitter)))
-            labels.append(0)
-            owners.append(image_index)
-    return (
-        torch.stack(triplets, dim=0),
-        torch.tensor(labels, device=keypoints01.device, dtype=torch.long),
-        torch.tensor(owners, device=keypoints01.device, dtype=torch.long),
-    )
+        points[:, cursor : cursor + int(background_points)] = backgrounds
+        labels[:, cursor : cursor + int(background_points)] = 0
+        valid[:, cursor : cursor + int(background_points)] = True
+        directions[:, cursor : cursor + int(background_points)] = anatomy_dir[:, None, :]
+        cursor += int(background_points)
+    if near_background_points > 0:
+        near_points, near_valid = sample_near_keypoint_background_points(
+            keypoints01,
+            keypoint_mask,
+            count=int(near_background_points),
+            min_distance=float(near_background_min_distance),
+            max_distance=float(near_background_max_distance),
+        )
+        points[:, cursor : cursor + int(near_background_points)] = near_points
+        labels[:, cursor : cursor + int(near_background_points)] = 0
+        valid[:, cursor : cursor + int(near_background_points)] = near_valid
+        directions[:, cursor : cursor + int(near_background_points)] = anatomy_dir[:, None, :]
+        cursor += int(near_background_points)
+    if hard_count:
+        hard_points = hard_negative_points01.to(device=device, dtype=dtype).clamp(0.0, 1.0)
+        hard_mask = (
+            torch.ones((batch_size, hard_count), device=device, dtype=torch.bool)
+            if hard_negative_mask is None
+            else hard_negative_mask.to(device=device).bool()
+        )
+        if hard_negative_directions01 is None:
+            hard_dirs = anatomy_dir[:, None, :].expand(batch_size, hard_count, 2)
+        else:
+            hard_dirs = hard_negative_directions01.to(device=device, dtype=dtype)
+        points[:, cursor : cursor + hard_count] = hard_points
+        labels[:, cursor : cursor + hard_count] = 0
+        valid[:, cursor : cursor + hard_count] = hard_mask
+        directions[:, cursor : cursor + hard_count] = hard_dirs
+    return points, labels, valid, directions
 
 
 def sample_background_points(
@@ -304,16 +418,65 @@ def sample_background_points(
     return result
 
 
-def corrupt_triplet(triplet: torch.Tensor, corrupt_index: int, *, jitter: float) -> torch.Tensor:
-    if corrupt_index % 3 == 0:
-        order = torch.tensor([1, 0, 2], device=triplet.device)
-        return triplet[order]
-    if corrupt_index % 3 == 1:
-        noisy = triplet + torch.randn_like(triplet) * float(jitter)
-        return noisy.clamp(0.0, 1.0)
-    replaced = triplet.clone()
-    replaced[corrupt_index % 3] = torch.rand((2,), device=triplet.device, dtype=triplet.dtype)
-    return replaced.clamp(0.0, 1.0)
+def sample_near_keypoint_background_points(
+    keypoints01: torch.Tensor,
+    keypoint_mask: torch.Tensor,
+    *,
+    count: int,
+    min_distance: float,
+    max_distance: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    batch_size = keypoints01.shape[0]
+    device = keypoints01.device
+    dtype = keypoints01.dtype
+    result = torch.zeros((batch_size, count, 2), device=device, dtype=dtype)
+    valid = torch.zeros((batch_size, count), device=device, dtype=torch.bool)
+    min_distance = max(float(min_distance), 1e-4)
+    max_distance = max(float(max_distance), min_distance)
+    for batch_index in range(batch_size):
+        visible_indices = keypoint_mask[batch_index].bool().nonzero(as_tuple=False).flatten()
+        if visible_indices.numel() == 0:
+            continue
+        for item_index in range(count):
+            keypoint_index = visible_indices[item_index % visible_indices.numel()]
+            center = keypoints01[batch_index, keypoint_index]
+            angle = torch.rand((), device=device, dtype=dtype) * (2.0 * math.pi)
+            radius = min_distance + torch.rand((), device=device, dtype=dtype) * (max_distance - min_distance)
+            offset = torch.stack((torch.cos(angle), torch.sin(angle))) * radius
+            result[batch_index, item_index] = (center + offset).clamp(0.0, 1.0)
+            valid[batch_index, item_index] = True
+    return result, valid
+
+
+def dinov3_confidence_gate(
+    point_region_score: torch.Tensor,
+    *,
+    gate_mode: str = "reward_only",
+    reject_threshold: float = 0.0,
+    penalty_threshold: float = 0.0,
+    reward_threshold: float = 0.30,
+    direct_accept_threshold: float = 0.60,
+    reward_multiplier: float = 1.50,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    gate_mode = str(gate_mode).lower()
+    reject_threshold = min(max(float(reject_threshold), 0.0), 1.0)
+    reward_threshold = min(max(float(reward_threshold), 0.0), 1.0)
+    direct_accept_threshold = min(max(float(direct_accept_threshold), reward_threshold), 1.0)
+    reward_multiplier = max(float(reward_multiplier), 1.0)
+
+    reward_range = max(direct_accept_threshold - reward_threshold, 1e-6)
+    reward_progress = ((point_region_score - reward_threshold) / reward_range).clamp(0.0, 1.0)
+    reward_factor = 1.0 + (reward_multiplier - 1.0) * reward_progress
+    if gate_mode == "penalty_reward":
+        penalty_threshold = max(float(penalty_threshold), 1e-6)
+        penalty_factor = (point_region_score / penalty_threshold).clamp(0.0, 1.0)
+        reward_factor = torch.where(point_region_score < penalty_threshold, penalty_factor, reward_factor)
+    elif gate_mode != "reward_only":
+        raise ValueError("DINOv3 confidence_gate_mode must be 'reward_only' or 'penalty_reward'.")
+
+    direct_accept = point_region_score >= direct_accept_threshold
+    hard_reject = point_region_score < reject_threshold if reject_threshold > 0.0 else torch.zeros_like(direct_accept)
+    return reward_factor, direct_accept, hard_reject
 
 
 def score_aux_triplet(
@@ -322,29 +485,65 @@ def score_aux_triplet(
     global_feature: torch.Tensor,
     triplets01: torch.Tensor,
     *,
+    patch_size_input: float | tuple[float, float] = 48.0,
+    input_size: int = 448,
     score_mode: str = "geometric_mean",
+    gate_mode: str = "reward_only",
+    reject_threshold: float = 0.0,
+    penalty_threshold: float = 0.0,
+    reward_threshold: float = 0.30,
+    direct_accept_threshold: float = 0.60,
+    reward_multiplier: float = 1.50,
+    valid_mask_map: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
-    point_features = sample_point_features(feature_map, triplets01)
-    point_logits = head.point_logits(point_features, triplets01)
+    del global_feature
+    directions, _ = anatomy_directions(triplets01, torch.ones(triplets01.shape[:2], device=triplets01.device, dtype=torch.bool))
+    point_features = sample_oriented_point_regions(
+        feature_map,
+        triplets01,
+        directions[:, None, :].expand_as(triplets01),
+        patch_size_input=patch_size_input,
+        input_size=input_size,
+        output_size=head.patch_output_size,
+    )
+    point_valid_mask = None
+    if head.include_valid_mask:
+        if valid_mask_map is None:
+            raise ValueError("valid_mask_map is required when head.include_valid_mask=True")
+        point_valid_mask = sample_oriented_point_region_masks(
+            valid_mask_map,
+            triplets01,
+            directions[:, None, :].expand_as(triplets01),
+            patch_size_input=patch_size_input,
+            input_size=input_size,
+            output_size=head.patch_output_size,
+        )
+    point_logits = head.point_logits(point_features, triplets01, valid_mask=point_valid_mask)
     expected = torch.arange(1, 4, device=triplets01.device).view(1, 3)
     point_probs = F.softmax(point_logits, dim=-1).gather(-1, expected[:, :, None].expand(triplets01.shape[0], -1, 1)).squeeze(-1)
-    triplet_logits = head.triplet_logits(point_features, triplets01)
-    triplet_valid_prob = F.softmax(triplet_logits, dim=-1)[:, 1]
-    image_reject_prob = F.softmax(head.image_logits(global_feature), dim=-1)[:, 1]
     if score_mode == "min":
-        confidence_factor = torch.minimum(point_probs.min(dim=1).values, triplet_valid_prob)
-        confidence_factor = torch.minimum(confidence_factor, 1.0 - image_reject_prob)
+        point_region_score = point_probs.min(dim=1).values
     else:
-        confidence_factor = (
-            point_probs.clamp_min(1e-6).prod(dim=1)
-            * triplet_valid_prob.clamp_min(1e-6)
-            * (1.0 - image_reject_prob).clamp_min(1e-6)
-        ).pow(1.0 / 5.0)
+        point_region_score = point_probs.clamp_min(1e-6).prod(dim=1).pow(1.0 / 3.0)
+    confidence_factor, direct_accept, hard_reject = dinov3_confidence_gate(
+        point_region_score,
+        gate_mode=gate_mode,
+        reject_threshold=reject_threshold,
+        penalty_threshold=penalty_threshold,
+        reward_threshold=reward_threshold,
+        direct_accept_threshold=direct_accept_threshold,
+        reward_multiplier=reward_multiplier,
+    )
     return {
         "point_expected_probs": point_probs,
-        "triplet_valid_prob": triplet_valid_prob,
-        "image_reject_prob": image_reject_prob,
+        "point_region_score": point_region_score,
         "confidence_factor": confidence_factor,
+        "direct_accept": direct_accept,
+        "hard_reject": hard_reject,
+        "valid_fraction": (
+            torch.ones_like(point_region_score)
+            if point_valid_mask is None
+            else point_valid_mask.mean(dim=(2, 3, 4)).mean(dim=1)
+        ),
         "point_logits": point_logits,
-        "triplet_logits": triplet_logits,
     }

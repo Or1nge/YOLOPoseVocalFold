@@ -231,12 +231,10 @@ python tools/run_three_stage_oriented_mixed_reject_pipeline.py \
 
 ```text
 image -> frozen DINOv3 dense features
-      -> point head: background / anterior / left posterior / right posterior
-      -> triplet head: ordered A/L/R triplet plausible or corrupted
-      -> image head: usable vocal-fold image or mixed/reject image
+      -> oriented point-region head: background / anterior / left posterior / right posterior
 ```
 
-左后方和右后方不被当作彼此的正样本；病变造成的不对称性应被保留。DINOv3 只提供高维局部语义特征，三点监督仍来自人工 YOLO-Pose 标签。
+左后方和右后方不被当作彼此的正样本；病变造成的不对称性应被保留。DINOv3 只提供高维局部语义特征，三点监督仍来自人工 YOLO-Pose 标签。当前 active 版本只训练点区域四分类，不再训练 triplet head 或 image reject head；hard negative 来自排除 holdout 后的混杂图误检点和关键点邻域 near-miss 背景。DINO 输入不额外裁黑边；训练/打分使用数据集或 prediction JSONL 给出的图像路径，再 letterbox 到 DINO 输入尺寸。点区域 head 会同时采样一张有效像素 mask，让 48x48 有向局部 patch 中的黑边区域不作为正常组织特征参与判断。
 
 默认配置用 `timm/vit_small_patch16_dinov3.lvd1689m` 这份公开 DINOv3 ViT-S/16 权重。官方 `facebook/dinov3-vits16-pretrain-lvd1689m` 仓库是 gated；如果已经获得访问权限，也可以把 `dinov3.backend` 改成 `transformers` 并使用官方模型 id。
 
@@ -259,12 +257,13 @@ python tools/train_dinov3_keypoint_aux.py \
 
 ```bash
 python tools/score_predictions_with_dinov3_aux.py \
-  --aux-checkpoint Results/dinov3_keypoint_aux/dinov3_vits16_three_point_aux_448_mixedneg60/weights/best_aux_head.pt \
+  --aux-checkpoint Results/dinov3_keypoint_aux/dinov3_vits16_oriented_point_region_hardneg_448_ldp200/weights/best_aux_head.pt \
   --predictions Results/predictions/predictions.jsonl \
   --out Results/predictions/predictions_dinov3_aux.jsonl
 ```
 
-默认只追加 `dinov3_aux` 字段，不改变原来的 `final_confidence/action`。需要让 auxiliary score 降低置信度时，再加 `--apply-confidence-gate`。设计说明见 `docs/dinov3_keypoint_aux_design_20260524.md`。
+默认只追加 `dinov3_aux` 字段，不改变原来的 `final_confidence/action`。需要让 auxiliary score 修改置信度时，再加 `--apply-confidence-gate`。设计说明见 `docs/dinov3_keypoint_aux_design_20260524.md`。
+当前 gate 只做正向证据：`point_region_score < 0.30` 不改变原置信度，`0.30-0.60` 按比例从 `1.0x` 奖励到 `1.5x`，`>=0.60` 作为极高分 DINO 直接通过候选；DINO 低分不再直接拒绝。2026-05-24 评估见 `docs/dinov3_point_region_hardneg_evaluation_20260524.md`。
 
 ## 推理
 

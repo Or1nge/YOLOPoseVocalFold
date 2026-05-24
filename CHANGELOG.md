@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Started `exp/dinov3-keypoint-aux` as a replacement direction for keypoint-local contrast.
-- Added a frozen-DINOv3 auxiliary scorer with point type judgement, ordered A/L/R triplet plausibility, and weak image reject scoring without treating L/R as positive pairs.
+- Narrowed the frozen-DINOv3 auxiliary scorer to oriented point-region `background/A/L/R` classification with mined hard negatives and a reward-only confidence gate: `0.30-0.60` linearly rewards up to `1.5x`, very high scores can directly pass, and low DINO scores no longer directly reject.
+- Added foreground-valid mask support to DINOv3 oriented point-region patches so local black-border pixels are zeroed and exposed to the point head as a mask channel without cropping the full DINO input image.
 - Added training and prediction-scoring entrypoints: `tools/train_dinov3_keypoint_aux.py` and `tools/score_predictions_with_dinov3_aux.py`.
 - Added DINOv3 auxiliary configs, design notes, and unit tests.
 - Completed the three-stage oriented contrast run with 200 random blackpadded
@@ -44,7 +45,7 @@
 - Added ROI-area and keypoint image-boundary confidence gates to reduce usable boxes on obvious non-vocal-fold LDP images.
 - Removed the anterior-vs-posterior image-y ordering gate; anterior/posterior keypoints are no longer rejected solely because patient position flips their vertical order.
 - Added a configurable predicted-ROI dark-region gate to downgrade bright/highlight-only regions without using manual annotations, now defaulting to exposure-relative foreground median thresholding so synthetic black borders do not dominate the threshold.
-- Changed ROI relative-area scoring to divide by the non-black effective image area, so large input black borders no longer make clear vocal-fold ROIs look artificially too small.
+- Changed ROI relative-area scoring to divide by the non-black foreground bounding-rectangle area, so large input black borders no longer make clear vocal-fold ROIs look artificially too small.
 - Softened the three-point glottic angle gate so angles outside `20°-130°` are penalized instead of forcing `geometry_score=0`.
 - Added tooling and a YOLO11m containment recipe for training with 60 empty-label `混杂图片` negative samples.
 - Added an LDP pseudo-label fine-tuning recipe that copies accepted/review non-`混杂图片` predictions as YOLO-Pose positives, uses all `混杂图片` as empty-label negatives, and repeats mixed false accepts as hard negatives.
