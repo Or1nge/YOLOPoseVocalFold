@@ -48,7 +48,10 @@ class PostprocessConfig:
     min_roi_area_ratio: float = 0.0
     good_roi_area_ratio: float = 0.0
     keypoint_image_bounds_tolerance_px: float = 0.0
+    roi_dark_mode: str = "absolute"
     roi_dark_luma_threshold: float = 0.0
+    roi_dark_relative_luma_ratio: float = 0.80
+    roi_dark_foreground_luma_floor: float = 8.0
     min_roi_dark_fraction: float = 0.0
     good_roi_dark_fraction: float = 0.0
     fusion_mode: str = "angle_bisector"

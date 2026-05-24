@@ -10,6 +10,7 @@ from yoloposevf.geometry import (
     polygon_containment_rate,
 )
 from yoloposevf.postprocess import PosePrediction, PostprocessConfig, fuse_prediction
+from tools.predict_roi import polygon_dark_fraction
 
 
 def _sub(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float]:
@@ -210,3 +211,31 @@ def test_anterior_point_y_order_does_not_force_rejection() -> None:
     assert output["final_confidence"] > 0.0
     assert "anterior_point_not_below_posterior_points" not in output["flags"]
     assert "weak_anterior_posterior_orientation" not in output["flags"]
+
+
+def test_relative_dark_gate_ignores_synthetic_black_border(tmp_path) -> None:
+    from PIL import Image
+
+    image = Image.new("L", (10, 10), 0)
+    for y in range(2, 8):
+        for x in range(2, 8):
+            image.putpixel((x, y), 100)
+    for y in range(3, 5):
+        for x in range(3, 6):
+            image.putpixel((x, y), 60)
+    path = tmp_path / "blackpad_sample.png"
+    image.save(path)
+
+    dark_fraction, threshold, reference_luma = polygon_dark_fraction(
+        path,
+        [(2, 2), (7, 2), (7, 7), (2, 7)],
+        75.0,
+        mode="relative_foreground_median",
+        relative_luma_ratio=0.70,
+        foreground_luma_floor=8.0,
+    )
+
+    assert reference_luma == 100.0
+    assert threshold == 70.0
+    assert dark_fraction is not None
+    assert 0.0 < dark_fraction < 1.0

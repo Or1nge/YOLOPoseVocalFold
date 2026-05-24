@@ -23,7 +23,10 @@ confidence_consistency_weight: 0.25
 min_roi_area_ratio: 0.03
 good_roi_area_ratio: 0.08
 keypoint_image_bounds_tolerance_px: 5.0
+roi_dark_mode: relative_foreground_median
 roi_dark_luma_threshold: 75.0
+roi_dark_relative_luma_ratio: 0.80
+roi_dark_foreground_luma_floor: 8.0
 min_roi_dark_fraction: 0.10
 good_roi_dark_fraction: 0.20
 fusion_mode: angle_bisector
