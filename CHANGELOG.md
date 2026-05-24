@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Promoted ROI localization preprocessing to `V1.2`: prediction now always crops existing near-black borders first, saves a no-existing-black-border `cropped_source`, then adds the required uniform blackpad for YOLO-Pose inference.
+- Changed ROI area and dark-region gates to prefer the preprocessed effective image region so the newly added artificial black border does not inflate area denominators or dark fractions.
 - Promoted ROI localization to `V1.1`: `tools/predict_roi.py` now applies black-border pre-enhancement to every input image by default before YOLO-Pose inference and postprocessing.
 - Changed directory/list ROI prediction to stream one image at a time so full LDP inference does not batch thousands of paths into GPU memory.
 - Added `--copy-original-classes` to ROI crop export, allowing rules such as cropping accepted/review images while keeping only `混杂图片` rejects as originals and skipping other rejects.

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -15,11 +16,17 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from yoloposevf.geometry import ImageSize
-from yoloposevf.postprocess import PosePrediction, PostprocessConfig, decide_action, fuse_prediction, load_postprocess_config
-from yoloposevf.preprocess import IMAGE_EXTENSIONS, blackpad_image_file
+from yoloposevf.postprocess import (
+    PosePrediction,
+    PostprocessConfig,
+    decide_action,
+    fuse_prediction,
+    load_postprocess_config,
+)
+from yoloposevf.preprocess import IMAGE_EXTENSIONS, crop_black_border_then_blackpad_image_file
 
 
-ALGORITHM_VERSION = "V1.1"
+ALGORITHM_VERSION = "V1.2"
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,10 +41,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tta", action="store_true", help="Use rotation/scale test-time augmentation without flips.")
     parser.add_argument("--tta-degrees", default="-6,0,6", help="Comma-separated rotation degrees for --tta.")
     parser.add_argument("--tta-scales", default="0.95,1.0,1.05", help="Comma-separated scale factors for --tta.")
-    parser.add_argument("--no-blackpad", action="store_true", help="Disable the V1.1 black-border pre-enhancement.")
     parser.add_argument("--blackpad-fraction", type=float, default=0.30)
     parser.add_argument("--blackpad-min-padding", type=int, default=80)
     parser.add_argument("--blackpad-input-dir", type=Path, help="Directory for generated black-padded inference inputs.")
+    parser.add_argument("--cropped-input-dir", type=Path, help="Directory for generated no-existing-black-border inputs.")
+    parser.add_argument("--black-border-luma-floor", type=float, default=8.0)
     return parser.parse_args()
 
 
@@ -61,6 +69,10 @@ def default_blackpad_input_dir(out_path: Path) -> Path:
     return out_path.parent / f"{out_path.stem}_blackpad_inputs"
 
 
+def default_cropped_input_dir(out_path: Path) -> Path:
+    return out_path.parent / f"{out_path.stem}_cropped_inputs"
+
+
 def relative_image_path(image_path: Path, source: Path) -> Path:
     if source.is_file():
         return Path(image_path.name)
@@ -71,41 +83,38 @@ def prepare_inference_images(
     source: Path,
     *,
     out_path: Path,
-    blackpad_enabled: bool,
     blackpad_input_dir: Path | None,
+    cropped_input_dir: Path | None,
     blackpad_fraction: float,
     blackpad_min_padding: int,
+    black_border_luma_floor: float,
 ) -> tuple[list[Path], dict[str, dict[str, Any]]]:
     images = iter_images(source)
     metadata: dict[str, dict[str, Any]] = {}
-    if not blackpad_enabled:
-        for image_path in images:
-            resolved = image_path.resolve()
-            metadata[str(image_path.resolve())] = {
-                "source": str(resolved),
-                "original_source": str(resolved),
-                "preprocess": {"type": "none"},
-            }
-        return images, metadata
 
     pad_root = (blackpad_input_dir or default_blackpad_input_dir(out_path)).resolve()
-    padded_images: list[Path] = []
+    crop_root = (cropped_input_dir or default_cropped_input_dir(out_path)).resolve()
+    model_input_images: list[Path] = []
     for image_path in images:
         rel = relative_image_path(image_path, source)
         destination = pad_root / rel
-        info = blackpad_image_file(
+        cropped_destination = crop_root / rel
+        info = crop_black_border_then_blackpad_image_file(
             image_path,
             destination,
+            cropped_destination=cropped_destination,
             fraction=blackpad_fraction,
             min_padding=blackpad_min_padding,
+            black_luma_floor=black_border_luma_floor,
         )
-        padded_images.append(destination)
+        model_input_images.append(destination)
         metadata[str(destination.resolve())] = {
             "source": str(destination.resolve()),
             "original_source": str(image_path.resolve()),
+            "cropped_source": str(cropped_destination.resolve()),
             "preprocess": info.to_dict(),
         }
-    return padded_images, metadata
+    return model_input_images, metadata
 
 
 def result_to_prediction(
@@ -231,6 +240,7 @@ def polygon_dark_fraction(
     mode: str = "absolute",
     relative_luma_ratio: float = 0.80,
     foreground_luma_floor: float = 8.0,
+    analysis_bbox: Sequence[float] | None = None,
 ) -> tuple[float | None, float | None, float | None]:
     try:
         import numpy as np
@@ -245,11 +255,25 @@ def polygon_dark_fraction(
     points = [(float(point[0]), float(point[1])) for point in polygon]
     ImageDraw.Draw(mask).polygon(points, fill=1)
     image_array = np.asarray(image)
-    mask_array = np.asarray(mask, dtype=bool)
+    mask_array = np.asarray(mask, dtype=bool).copy()
+    threshold_array = image_array
+    if analysis_bbox is not None:
+        image_height, image_width = mask_array.shape
+        x1, y1, x2, y2 = [float(value) for value in analysis_bbox]
+        left = max(0, min(image_width, int(math.floor(min(x1, x2)))))
+        top = max(0, min(image_height, int(math.floor(min(y1, y2)))))
+        right = max(0, min(image_width, int(math.ceil(max(x1, x2)))))
+        bottom = max(0, min(image_height, int(math.ceil(max(y1, y2)))))
+        if left >= right or top >= bottom:
+            return 0.0, None, None
+        valid_region = np.zeros_like(mask_array, dtype=bool)
+        valid_region[top:bottom, left:right] = True
+        mask_array &= valid_region
+        threshold_array = image_array[top:bottom, left:right]
     if not mask_array.any():
         return 0.0, None, None
     effective_threshold, reference_luma = _relative_dark_threshold(
-        image_array,
+        threshold_array,
         mode=mode,
         absolute_threshold=luma_threshold,
         relative_ratio=relative_luma_ratio,
@@ -284,6 +308,29 @@ def effective_area_from_metadata(
     metadata: dict[str, Any],
     cfg: PostprocessConfig,
 ) -> tuple[float | None, tuple[float, float, float, float] | None, str]:
+    preprocess = metadata.get("preprocess") if isinstance(metadata.get("preprocess"), dict) else {}
+    preprocess_type = str(preprocess.get("type", ""))
+    no_black_bbox = preprocess.get("no_black_bbox_in_model_input")
+    if isinstance(no_black_bbox, (list, tuple)) and len(no_black_bbox) == 4:
+        x1, y1, x2, y2 = [float(value) for value in no_black_bbox]
+        area = max(x2 - x1, 0.0) * max(y2 - y1, 0.0)
+        if area > 0.0:
+            return area, (x1, y1, x2, y2), "preprocess_no_black_bbox"
+
+    if preprocess_type in {"crop_black_border_then_blackpad", "crop_black_border", "blackpad"}:
+        padding = float(preprocess.get("padding_px", 0.0) or 0.0)
+        if preprocess_type in {"crop_black_border_then_blackpad", "crop_black_border"}:
+            width = float(preprocess.get("cropped_width", 0.0) or 0.0)
+            height = float(preprocess.get("cropped_height", 0.0) or 0.0)
+            mode = "preprocess_cropped_region"
+        else:
+            width = float(preprocess.get("original_width", 0.0) or 0.0)
+            height = float(preprocess.get("original_height", 0.0) or 0.0)
+            mode = "preprocess_original_region"
+        if width > 0.0 and height > 0.0:
+            bbox = (padding, padding, padding + width, padding + height)
+            return width * height, bbox, mode
+
     foreground_floor = float(cfg.roi_dark_foreground_luma_floor)
     source = Path(str(metadata.get("source") or ""))
     bbox = foreground_bbox(source, foreground_luma_floor=foreground_floor)
@@ -327,6 +374,7 @@ def apply_image_quality_gates(record: dict[str, Any], image_path: Path, cfg: Pos
             mode=dark_mode,
             relative_luma_ratio=cfg.roi_dark_relative_luma_ratio,
             foreground_luma_floor=cfg.roi_dark_foreground_luma_floor,
+            analysis_bbox=record.get("effective_image_bbox"),
         )
         if polygon
         else (None, None, None)
@@ -431,6 +479,8 @@ def attach_prediction_metadata(record: dict[str, Any], metadata: dict[str, Any])
     record["algorithm_version"] = ALGORITHM_VERSION
     record["source"] = metadata["source"]
     record["original_source"] = metadata["original_source"]
+    if "cropped_source" in metadata:
+        record["cropped_source"] = metadata["cropped_source"]
     record["preprocess"] = metadata["preprocess"]
     return record
 
@@ -447,10 +497,11 @@ def main() -> None:
     images, source_metadata = prepare_inference_images(
         args.source,
         out_path=args.out,
-        blackpad_enabled=not args.no_blackpad,
         blackpad_input_dir=args.blackpad_input_dir,
+        cropped_input_dir=args.cropped_input_dir,
         blackpad_fraction=args.blackpad_fraction,
         blackpad_min_padding=args.blackpad_min_padding,
+        black_border_luma_floor=args.black_border_luma_floor,
     )
     predict_kwargs: dict[str, Any] = {"conf": args.conf, "stream": True, "verbose": False}
     if args.device is not None:

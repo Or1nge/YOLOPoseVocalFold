@@ -6,11 +6,12 @@ main 现在包含标准 YOLO-Pose 训练、推理后处理、keypoint-containmen
 
 1. LabelMe 转 YOLO-Pose 标签。
 2. 标准 YOLO-Pose 训练。
-3. 推理得到 `bbox + 3 keypoints + confidence`。
-4. 以前联合为顶点，连接左右后方中点并取夹角角平分线。
-5. 沿角平分线反方向回退一小段到 A 点，以垂直于角平分线的线段为底，生成旋转 ROI。
-6. 输出 `final_box_polygon` 作为最终四点旋转框：一条边平行于角平分线，左右宽度按两侧后方点到角平分线的投影分别扩张；`final_bbox_xyxy` / `final_bbox` 只作为传统 bbox 评估的外接矩形兼容字段。
-7. 计算 `final_confidence` 并输出 `auto_accept / manual_review / reject_or_relabel`；低置信度样本保留置信度和原因，但 `usable_box_polygon` 置空，不作为自动 ROI。当前配置会用 `confidence_curve=tanh` 拉开中低置信度差异，并用 ROI 面积、关键点是否越出图像边界等 gate 降低明显非声带区域的自动可用风险。
+3. 预测前先裁掉原图已有近纯黑边，得到矩形有效图像；再加统一宽度黑边后交给 YOLO-Pose，blackpad 是必需输入步骤。
+4. 推理得到 `bbox + 3 keypoints + confidence`。
+5. 以前联合为顶点，连接左右后方中点并取夹角角平分线。
+6. 沿角平分线反方向回退一小段到 A 点，以垂直于角平分线的线段为底，生成旋转 ROI。
+7. 输出 `final_box_polygon` 作为最终四点旋转框：一条边平行于角平分线，左右宽度按两侧后方点到角平分线的投影分别扩张；`final_bbox_xyxy` / `final_bbox` 只作为传统 bbox 评估的外接矩形兼容字段。
+8. 计算 `final_confidence` 并输出 `auto_accept / manual_review / reject_or_relabel`；低置信度样本保留置信度和原因，但 `usable_box_polygon` 置空，不作为自动 ROI。当前配置会用 `confidence_curve=tanh` 拉开中低置信度差异，并用 ROI 面积、关键点是否越出图像边界等 gate 降低明显非声带区域的自动可用风险。
 
 ## Keypoint-Containment Loss
 
