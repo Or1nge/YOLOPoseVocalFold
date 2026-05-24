@@ -270,19 +270,20 @@ def test_relative_dark_gate_ignores_synthetic_black_border(tmp_path) -> None:
     assert 0.0 < dark_fraction < 1.0
 
 
-def test_effective_area_from_blackpad_metadata_uses_original_foreground_bbox(tmp_path) -> None:
+def test_effective_area_from_metadata_uses_model_input_foreground_bbox(tmp_path) -> None:
     from PIL import Image
 
-    image = Image.new("L", (10, 10), 0)
-    for y in range(3, 9):
-        for x in range(2, 8):
+    image = Image.new("L", (20, 20), 0)
+    for y in range(8, 14):
+        for x in range(7, 13):
             image.putpixel((x, y), 120)
-    path = tmp_path / "black_border_sample.png"
+    path = tmp_path / "model_input_black_border_sample.png"
     image.save(path)
 
     area, bbox, mode = effective_area_from_metadata(
         {
-            "original_source": str(path),
+            "source": str(path),
+            "original_source": str(tmp_path / "not_used.png"),
             "preprocess": {
                 "type": "blackpad",
                 "padding_px": 5,
@@ -295,4 +296,4 @@ def test_effective_area_from_blackpad_metadata_uses_original_foreground_bbox(tmp
 
     assert area == 36.0
     assert bbox == (7.0, 8.0, 13.0, 14.0)
-    assert mode == "blackpad_foreground_bbox"
+    assert mode == "input_foreground_bbox"

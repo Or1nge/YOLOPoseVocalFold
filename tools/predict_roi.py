@@ -284,35 +284,14 @@ def effective_area_from_metadata(
     metadata: dict[str, Any],
     cfg: PostprocessConfig,
 ) -> tuple[float | None, tuple[float, float, float, float] | None, str]:
-    preprocess = metadata.get("preprocess") or {}
-    preprocess_type = str(preprocess.get("type") or "none")
     foreground_floor = float(cfg.roi_dark_foreground_luma_floor)
-
-    if preprocess_type == "blackpad":
-        original_source = Path(str(metadata.get("original_source") or ""))
-        original_bbox = foreground_bbox(original_source, foreground_luma_floor=foreground_floor)
-        if original_bbox is None:
-            original_width = float(preprocess.get("original_width") or 0.0)
-            original_height = float(preprocess.get("original_height") or 0.0)
-            if original_width <= 0.0 or original_height <= 0.0:
-                return None, None, "full_image"
-            original_bbox = (0.0, 0.0, original_width, original_height)
-            mode = "blackpad_original_extent"
-        else:
-            mode = "blackpad_foreground_bbox"
-        padding = float(preprocess.get("padding_px") or 0.0)
-        x1, y1, x2, y2 = original_bbox
-        bbox = (x1 + padding, y1 + padding, x2 + padding, y2 + padding)
-        area = max(x2 - x1, 0.0) * max(y2 - y1, 0.0)
-        return (area if area > 0.0 else None), bbox, mode
-
-    source = Path(str(metadata.get("original_source") or metadata.get("source") or ""))
+    source = Path(str(metadata.get("source") or ""))
     bbox = foreground_bbox(source, foreground_luma_floor=foreground_floor)
     if bbox is None:
         return None, None, "full_image"
     x1, y1, x2, y2 = bbox
     area = max(x2 - x1, 0.0) * max(y2 - y1, 0.0)
-    return (area if area > 0.0 else None), bbox, "foreground_bbox"
+    return (area if area > 0.0 else None), bbox, "input_foreground_bbox"
 
 
 def prediction_with_effective_area(
