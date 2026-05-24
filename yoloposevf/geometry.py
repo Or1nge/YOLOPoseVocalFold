@@ -446,13 +446,19 @@ def geometry_score(
     if len(points) == 3:
         anterior, left_posterior, right_posterior = points
         glottic_angle = included_angle_degrees(anterior, left_posterior, right_posterior)
-        if glottic_angle < min_glottic_angle_degrees or glottic_angle > max_glottic_angle_degrees:
-            return 0.0
-        angle_score = _soft_score(
-            glottic_angle,
-            good=good_glottic_angle_degrees,
-            bad=min_glottic_angle_degrees,
-            larger_is_worse=False,
+        angle_outside_range = (
+            glottic_angle < min_glottic_angle_degrees
+            or glottic_angle > max_glottic_angle_degrees
+        )
+        angle_score = (
+            0.6
+            if angle_outside_range
+            else _soft_score(
+                glottic_angle,
+                good=good_glottic_angle_degrees,
+                bad=min_glottic_angle_degrees,
+                larger_is_worse=False,
+            )
         )
 
         direction = angle_bisector_direction(anterior, left_posterior, right_posterior)
@@ -482,6 +488,9 @@ def geometry_score(
             area_score = 0.4 if 0.001 <= area_ratio <= 0.95 else 0.0
 
         contain_score = containment_rate(bbox, points)
+        if angle_outside_range:
+            scores = [posterior_score, opening_score, aspect_score, area_score, contain_score]
+            return float(clamp(angle_score * (sum(scores) / len(scores)), 0.0, 1.0))
         scores = [posterior_score, opening_score, angle_score, aspect_score, area_score, contain_score]
         return float(clamp(sum(scores) / len(scores), 0.0, 1.0))
 
