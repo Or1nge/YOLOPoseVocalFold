@@ -64,6 +64,9 @@ class PosePrediction:
     keypoints: tuple[tuple[float, float, float], ...]
     image_size: ImageSize
     source: str | None = None
+    effective_image_area: float | None = None
+    effective_image_bbox: BBox | None = None
+    effective_image_area_mode: str | None = None
 
 
 def _keypoint_confidence(keypoints: Sequence[Sequence[float]], mode: str) -> float:
@@ -143,6 +146,13 @@ def _max_keypoint_outside_image_px(
     return max(0.0, max_distance)
 
 
+def _area_denominator(prediction: PosePrediction) -> tuple[float, str]:
+    full_image_area = max(float(prediction.image_size.width * prediction.image_size.height), 1.0)
+    if prediction.effective_image_area is not None and prediction.effective_image_area > 0.0:
+        return max(float(prediction.effective_image_area), 1.0), prediction.effective_image_area_mode or "effective_image"
+    return full_image_area, "full_image"
+
+
 def fuse_prediction(prediction: PosePrediction, cfg: PostprocessConfig) -> dict[str, Any]:
     bbox_yolo = clip_bbox(prediction.bbox, prediction.image_size)
     keypoints = [tuple(map(float, kp)) for kp in prediction.keypoints]
@@ -150,6 +160,7 @@ def fuse_prediction(prediction: PosePrediction, cfg: PostprocessConfig) -> dict[
     flags: list[str] = []
     roi_polygon: list[list[float]] | None = None
     roi_area: float | None = None
+    area_denominator, area_denominator_mode = _area_denominator(prediction)
 
     if len(selected_kps) == 3:
         roi = angle_bisector_roi_from_three_points(
@@ -210,6 +221,7 @@ def fuse_prediction(prediction: PosePrediction, cfg: PostprocessConfig) -> dict[
         keypoints,
         final_bbox,
         prediction.image_size,
+        area_denominator=area_denominator,
         min_glottic_angle_degrees=cfg.min_glottic_angle_degrees,
         good_glottic_angle_degrees=cfg.good_glottic_angle_degrees,
         max_glottic_angle_degrees=cfg.max_glottic_angle_degrees,
@@ -228,9 +240,8 @@ def fuse_prediction(prediction: PosePrediction, cfg: PostprocessConfig) -> dict[
     if contained < 1.0:
         flags.append("keypoints_outside_final_box")
 
-    image_area = max(float(prediction.image_size.width * prediction.image_size.height), 1.0)
-    final_bbox_area_ratio = bbox_area(final_bbox) / image_area
-    roi_area_ratio = roi_area / image_area if roi_area is not None else None
+    final_bbox_area_ratio = bbox_area(final_bbox) / area_denominator
+    roi_area_ratio = roi_area / area_denominator if roi_area is not None else None
     roi_area_factor = _lower_bound_factor(roi_area_ratio, cfg.min_roi_area_ratio, cfg.good_roi_area_ratio)
     if roi_area_ratio is not None and cfg.good_roi_area_ratio > 0.0 and roi_area_ratio < cfg.good_roi_area_ratio:
         flags.append("roi_area_too_small" if roi_area_ratio <= cfg.min_roi_area_ratio else "low_roi_area")
@@ -274,6 +285,9 @@ def fuse_prediction(prediction: PosePrediction, cfg: PostprocessConfig) -> dict[
         "glottic_angle_degrees": glottic_angle,
         "geometry_score": geom,
         "consistency_score": consistency,
+        "roi_area_denominator": area_denominator,
+        "roi_area_denominator_mode": area_denominator_mode,
+        "effective_image_bbox": list(prediction.effective_image_bbox) if prediction.effective_image_bbox is not None else None,
         "roi_area_ratio": roi_area_ratio,
         "roi_area_factor": roi_area_factor,
         "final_bbox_area_ratio": final_bbox_area_ratio,

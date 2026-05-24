@@ -432,6 +432,7 @@ def geometry_score(
     keypoints: Sequence[Sequence[float]],
     bbox: Sequence[float],
     image_size: ImageSize,
+    area_denominator: float | None = None,
     min_area_ratio: float = 0.005,
     max_area_ratio: float = 0.75,
     min_aspect: float = 0.35,
@@ -440,6 +441,7 @@ def geometry_score(
     good_glottic_angle_degrees: float = 35.0,
     max_glottic_angle_degrees: float = 130.0,
 ) -> float:
+    image_area = max(float(area_denominator or (image_size.width * image_size.height)), 1.0)
     points = [tuple(map(float, point[:2])) for point in keypoints if len(point) >= 2]
     if len(points) == 3:
         anterior, left_posterior, right_posterior = points
@@ -473,7 +475,7 @@ def geometry_score(
         else:
             aspect_score = 0.4 if 0.2 <= aspect <= 8.0 else 0.0
 
-        area_ratio = bbox_area(bbox) / max(float(image_size.width * image_size.height), 1.0)
+        area_ratio = bbox_area(bbox) / image_area
         if min_area_ratio <= area_ratio <= max_area_ratio:
             area_score = 1.0
         else:
@@ -511,7 +513,7 @@ def geometry_score(
     else:
         aspect_score = 0.4 if 0.2 <= aspect <= 8.0 else 0.0
 
-    area_ratio = bbox_area(bbox) / max(float(image_size.width * image_size.height), 1.0)
+    area_ratio = bbox_area(bbox) / image_area
     if min_area_ratio <= area_ratio <= max_area_ratio:
         area_score = 1.0
     else:
