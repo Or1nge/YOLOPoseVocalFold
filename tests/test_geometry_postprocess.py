@@ -87,13 +87,16 @@ def test_angle_bisector_roi_allows_asymmetric_lateral_widths() -> None:
     assert polygon_keypoint_containment_rate(roi.polygon, [point[:2] for point in keypoints]) == 1.0
 
 
-def test_three_point_geometry_rejects_implausibly_small_angle() -> None:
+def test_three_point_geometry_softly_penalizes_implausible_angles() -> None:
     image_size = ImageSize(width=100, height=100)
     nearly_collinear = [(50, 80, 2), (52, 20, 2), (53, 10, 2)]
+    wide_angle = [(50, 50, 2), (10, 50, 2), (90, 50, 2)]
     plausible = [(50, 80, 2), (25, 20, 2), (75, 20, 2)]
 
     assert included_angle_degrees(nearly_collinear[0], nearly_collinear[1], nearly_collinear[2]) < 20.0
-    assert geometry_score(nearly_collinear, (20, 10, 80, 90), image_size) == 0.0
+    assert included_angle_degrees(wide_angle[0], wide_angle[1], wide_angle[2]) > 130.0
+    assert 0.0 < geometry_score(nearly_collinear, (20, 10, 80, 90), image_size) <= 0.6
+    assert 0.0 < geometry_score(wide_angle, (5, 30, 95, 70), image_size) <= 0.6
     assert geometry_score(plausible, (20, 10, 80, 90), image_size) > 0.0
 
 
