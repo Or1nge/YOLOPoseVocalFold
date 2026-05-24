@@ -17,6 +17,7 @@
 - Added ROI-area and keypoint image-boundary confidence gates to reduce usable boxes on obvious non-vocal-fold LDP images.
 - Removed the anterior-vs-posterior image-y ordering gate; anterior/posterior keypoints are no longer rejected solely because patient position flips their vertical order.
 - Added a configurable predicted-ROI dark-region gate to downgrade bright/highlight-only regions without using manual annotations, now defaulting to exposure-relative foreground median thresholding so synthetic black borders do not dominate the threshold.
+- Changed ROI relative-area scoring to divide by the non-black effective image area, so large input black borders no longer make clear vocal-fold ROIs look artificially too small.
 - Added tooling and a YOLO11m containment recipe for training with 60 empty-label `混杂图片` negative samples.
 - Added an LDP pseudo-label fine-tuning recipe that copies accepted/review non-`混杂图片` predictions as YOLO-Pose positives, uses all `混杂图片` as empty-label negatives, and repeats mixed false accepts as hard negatives.
 - Updated overlay rendering so rejected predictions are drawn in red and predictions can be rendered directly from their `source` paths outside a YOLO dataset split.

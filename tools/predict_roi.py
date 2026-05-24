@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -257,6 +258,79 @@ def polygon_dark_fraction(
     return float((image_array[mask_array] < effective_threshold).mean()), effective_threshold, reference_luma
 
 
+def foreground_bbox(
+    image_path: Path,
+    *,
+    foreground_luma_floor: float = 8.0,
+) -> tuple[float, float, float, float] | None:
+    try:
+        import numpy as np
+        from PIL import Image
+    except ImportError:
+        return None
+
+    if not image_path.exists():
+        return None
+    image = Image.open(image_path).convert("L")
+    image_array = np.asarray(image)
+    mask = image_array > float(foreground_luma_floor)
+    if not mask.any():
+        return None
+    ys, xs = np.where(mask)
+    return float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1)
+
+
+def effective_area_from_metadata(
+    metadata: dict[str, Any],
+    cfg: PostprocessConfig,
+) -> tuple[float | None, tuple[float, float, float, float] | None, str]:
+    preprocess = metadata.get("preprocess") or {}
+    preprocess_type = str(preprocess.get("type") or "none")
+    foreground_floor = float(cfg.roi_dark_foreground_luma_floor)
+
+    if preprocess_type == "blackpad":
+        original_source = Path(str(metadata.get("original_source") or ""))
+        original_bbox = foreground_bbox(original_source, foreground_luma_floor=foreground_floor)
+        if original_bbox is None:
+            original_width = float(preprocess.get("original_width") or 0.0)
+            original_height = float(preprocess.get("original_height") or 0.0)
+            if original_width <= 0.0 or original_height <= 0.0:
+                return None, None, "full_image"
+            original_bbox = (0.0, 0.0, original_width, original_height)
+            mode = "blackpad_original_extent"
+        else:
+            mode = "blackpad_foreground_bbox"
+        padding = float(preprocess.get("padding_px") or 0.0)
+        x1, y1, x2, y2 = original_bbox
+        bbox = (x1 + padding, y1 + padding, x2 + padding, y2 + padding)
+        area = max(x2 - x1, 0.0) * max(y2 - y1, 0.0)
+        return (area if area > 0.0 else None), bbox, mode
+
+    source = Path(str(metadata.get("original_source") or metadata.get("source") or ""))
+    bbox = foreground_bbox(source, foreground_luma_floor=foreground_floor)
+    if bbox is None:
+        return None, None, "full_image"
+    x1, y1, x2, y2 = bbox
+    area = max(x2 - x1, 0.0) * max(y2 - y1, 0.0)
+    return (area if area > 0.0 else None), bbox, "foreground_bbox"
+
+
+def prediction_with_effective_area(
+    prediction: PosePrediction,
+    metadata: dict[str, Any],
+    cfg: PostprocessConfig,
+) -> PosePrediction:
+    area, bbox, mode = effective_area_from_metadata(metadata, cfg)
+    if area is None:
+        return prediction
+    return replace(
+        prediction,
+        effective_image_area=area,
+        effective_image_bbox=bbox,
+        effective_image_area_mode=mode,
+    )
+
+
 def apply_image_quality_gates(record: dict[str, Any], image_path: Path, cfg: PostprocessConfig) -> dict[str, Any]:
     dark_mode = str(cfg.roi_dark_mode).lower()
     dark_gate_enabled = cfg.good_roi_dark_fraction > 0.0 and (
@@ -439,6 +513,7 @@ def main() -> None:
                     "flags": ["no_valid_pose_prediction"],
                 }
             else:
+                prediction = prediction_with_effective_area(prediction, metadata, cfg)
                 record = fuse_prediction(prediction, cfg)
                 record = apply_image_quality_gates(record, Path(metadata["source"]), cfg)
                 record["keypoints"] = [list(kp) for kp in prediction.keypoints]

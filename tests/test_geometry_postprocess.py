@@ -10,7 +10,7 @@ from yoloposevf.geometry import (
     polygon_containment_rate,
 )
 from yoloposevf.postprocess import PosePrediction, PostprocessConfig, fuse_prediction
-from tools.predict_roi import polygon_dark_fraction
+from tools.predict_roi import effective_area_from_metadata, polygon_dark_fraction
 
 
 def _sub(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float]:
@@ -168,6 +168,35 @@ def test_tiny_three_point_roi_can_force_rejection() -> None:
     assert "roi_area_too_small" in output["flags"]
 
 
+def test_roi_area_ratio_can_use_effective_image_area_denominator() -> None:
+    prediction = PosePrediction(
+        bbox=(450, 450, 550, 550),
+        bbox_conf=0.95,
+        keypoints=((500, 530, 0.99), (470, 470, 0.99), (530, 470, 0.99)),
+        image_size=ImageSize(width=1000, height=1000),
+        source="tiny.png",
+        effective_image_area=10_000.0,
+        effective_image_bbox=(450.0, 450.0, 550.0, 550.0),
+        effective_image_area_mode="foreground_bbox",
+    )
+
+    output = fuse_prediction(
+        prediction,
+        PostprocessConfig(
+            confidence_gamma=2.0,
+            min_roi_area_ratio=0.03,
+            good_roi_area_ratio=0.08,
+        ),
+    )
+
+    assert output["roi_area_denominator"] == 10_000.0
+    assert output["roi_area_denominator_mode"] == "foreground_bbox"
+    assert output["effective_image_bbox"] == [450.0, 450.0, 550.0, 550.0]
+    assert output["roi_area_ratio"] > 0.08
+    assert output["roi_area_factor"] == 1.0
+    assert "roi_area_too_small" not in output["flags"]
+
+
 def test_keypoint_outside_image_bounds_forces_rejection() -> None:
     prediction = PosePrediction(
         bbox=(20, 20, 80, 80),
@@ -239,3 +268,31 @@ def test_relative_dark_gate_ignores_synthetic_black_border(tmp_path) -> None:
     assert threshold == 70.0
     assert dark_fraction is not None
     assert 0.0 < dark_fraction < 1.0
+
+
+def test_effective_area_from_blackpad_metadata_uses_original_foreground_bbox(tmp_path) -> None:
+    from PIL import Image
+
+    image = Image.new("L", (10, 10), 0)
+    for y in range(3, 9):
+        for x in range(2, 8):
+            image.putpixel((x, y), 120)
+    path = tmp_path / "black_border_sample.png"
+    image.save(path)
+
+    area, bbox, mode = effective_area_from_metadata(
+        {
+            "original_source": str(path),
+            "preprocess": {
+                "type": "blackpad",
+                "padding_px": 5,
+                "original_width": 10,
+                "original_height": 10,
+            },
+        },
+        PostprocessConfig(roi_dark_foreground_luma_floor=8.0),
+    )
+
+    assert area == 36.0
+    assert bbox == (7.0, 8.0, 13.0, 14.0)
+    assert mode == "blackpad_foreground_bbox"
