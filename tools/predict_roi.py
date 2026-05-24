@@ -198,15 +198,47 @@ def lower_bound_factor(value: float | None, low: float, good: float) -> float:
     return float((value - low) / (good - low))
 
 
-def polygon_dark_fraction(image_path: Path, polygon: Sequence[Sequence[float]], luma_threshold: float) -> float | None:
+def _relative_dark_threshold(
+    image_array: "np.ndarray",
+    *,
+    mode: str,
+    absolute_threshold: float,
+    relative_ratio: float,
+    foreground_luma_floor: float,
+) -> tuple[float, float | None]:
+    import numpy as np
+
+    mode = mode.lower()
+    if mode == "absolute":
+        return float(absolute_threshold), None
+    if mode not in {"relative", "relative_foreground_median"}:
+        raise ValueError(f"Unsupported roi_dark_mode: {mode}")
+
+    pixels = image_array.reshape(-1)
+    foreground = pixels[pixels > float(foreground_luma_floor)]
+    reference_pixels = foreground if foreground.size else pixels
+    reference_luma = float(np.median(reference_pixels))
+    threshold = max(0.0, min(255.0, reference_luma * max(float(relative_ratio), 0.0)))
+    return threshold, reference_luma
+
+
+def polygon_dark_fraction(
+    image_path: Path,
+    polygon: Sequence[Sequence[float]],
+    luma_threshold: float,
+    *,
+    mode: str = "absolute",
+    relative_luma_ratio: float = 0.80,
+    foreground_luma_floor: float = 8.0,
+) -> tuple[float | None, float | None, float | None]:
     try:
         import numpy as np
         from PIL import Image, ImageDraw
     except ImportError:
-        return None
+        return None, None, None
 
     if not image_path.exists() or not polygon:
-        return None
+        return None, None, None
     image = Image.open(image_path).convert("L")
     mask = Image.new("1", image.size, 0)
     points = [(float(point[0]), float(point[1])) for point in polygon]
@@ -214,20 +246,44 @@ def polygon_dark_fraction(image_path: Path, polygon: Sequence[Sequence[float]], 
     image_array = np.asarray(image)
     mask_array = np.asarray(mask, dtype=bool)
     if not mask_array.any():
-        return 0.0
-    return float((image_array[mask_array] < float(luma_threshold)).mean())
+        return 0.0, None, None
+    effective_threshold, reference_luma = _relative_dark_threshold(
+        image_array,
+        mode=mode,
+        absolute_threshold=luma_threshold,
+        relative_ratio=relative_luma_ratio,
+        foreground_luma_floor=foreground_luma_floor,
+    )
+    return float((image_array[mask_array] < effective_threshold).mean()), effective_threshold, reference_luma
 
 
 def apply_image_quality_gates(record: dict[str, Any], image_path: Path, cfg: PostprocessConfig) -> dict[str, Any]:
-    dark_gate_enabled = cfg.roi_dark_luma_threshold > 0.0 and cfg.good_roi_dark_fraction > 0.0
+    dark_mode = str(cfg.roi_dark_mode).lower()
+    dark_gate_enabled = cfg.good_roi_dark_fraction > 0.0 and (
+        dark_mode != "absolute" or cfg.roi_dark_luma_threshold > 0.0
+    )
     if not dark_gate_enabled:
         return record
 
     polygon = record.get("final_box_polygon") or record.get("roi_polygon")
-    dark_fraction = polygon_dark_fraction(image_path, polygon, cfg.roi_dark_luma_threshold) if polygon else None
+    dark_fraction, effective_threshold, reference_luma = (
+        polygon_dark_fraction(
+            image_path,
+            polygon,
+            cfg.roi_dark_luma_threshold,
+            mode=dark_mode,
+            relative_luma_ratio=cfg.roi_dark_relative_luma_ratio,
+            foreground_luma_floor=cfg.roi_dark_foreground_luma_floor,
+        )
+        if polygon
+        else (None, None, None)
+    )
     dark_factor = lower_bound_factor(dark_fraction, cfg.min_roi_dark_fraction, cfg.good_roi_dark_fraction)
     record["roi_dark_fraction"] = dark_fraction
     record["roi_dark_factor"] = dark_factor
+    record["roi_dark_mode"] = dark_mode
+    record["roi_dark_effective_luma_threshold"] = effective_threshold
+    record["roi_dark_reference_luma"] = reference_luma
     if dark_fraction is not None and dark_fraction < cfg.good_roi_dark_fraction:
         flags = record.setdefault("flags", [])
         flags.append("roi_too_bright" if dark_fraction <= cfg.min_roi_dark_fraction else "low_roi_dark_fraction")
