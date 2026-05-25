@@ -122,7 +122,11 @@ def crop_polygon(image: Image.Image, polygon: Sequence[Sequence[float]]) -> Imag
         return None
 
     width, height = polygon_size(polygon)
-    source = np.asarray([[float(x), float(y)] for x, y in polygon], dtype=np.float32)
+    # ROI polygons are ordered as anterior/base edge followed by posterior/far edge.
+    # Export crops with the anterior commissure at the bottom, so the
+    # anterior-to-posterior bisector points upward in the generated crop.
+    source_points = [polygon[3], polygon[2], polygon[1], polygon[0]]
+    source = np.asarray([[float(x), float(y)] for x, y in source_points], dtype=np.float32)
     target = np.asarray(
         [[0.0, 0.0], [width - 1.0, 0.0], [width - 1.0, height - 1.0], [0.0, height - 1.0]],
         dtype=np.float32,
