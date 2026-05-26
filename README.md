@@ -66,18 +66,22 @@ python tools/convert_labelme_to_yolo_pose.py \
 python tools/validate_dataset.py --dataset-dir data/yolo_pose
 ```
 
-如果确认 `混杂图片` 都没有声带区域，可把它们作为 YOLO-Pose 负样本加入训练集。负样本图片复制到新数据集的 `images/train/`，对应 `labels/train/*.txt` 保持空文件，表示背景/无声门 ROI：
+如果确认 `混杂图片` 都没有声带区域，可把它们作为 YOLO-Pose 负样本加入训练集。当前重建版本加入 120 张黑边增强混杂负样本，并排除固定 LDP holdout，负样本图片复制到新数据集的 `images/train/`，对应 `labels/train/*.txt` 保持空文件，表示背景/无声门 ROI：
 
 ```bash
 python tools/add_negative_images_to_yolo_pose.py \
   --base-dataset data/yolo_pose \
   --negative-source-dir /home/or1ngelinux/CVProjects/Larynx/Laryngeal_Dataset_Processed/混杂图片 \
-  --out-dir data/yolo_pose_mixed_negative_60 \
-  --count 60 \
-  --seed 20260522
+  --out-dir data/yolo_pose_mixed_negative_120_blackpad \
+  --count 120 \
+  --seed 20260525 \
+  --exclude-manifest data/ldp_holdout/ldp_holdout_100_per_class_seed20260525.jsonl \
+  --prefix mixed_negative120_blackpad \
+  --blackpad-negatives \
+  --overwrite
 ```
 
-带 60 张混杂负样本的训练配置在 `configs/train_containment_mixed_negative_y11m.yaml`。
+带 120 张黑边混杂负样本的训练配置在 `configs/train_containment_mixed_negative_120_blackpad_y11m.yaml`。
 
 如果要让 LDP 参与微调，同时强惩罚 `混杂图片` 误检，可先用上一轮 LDP 八分类预测结果构造 pseudo 数据集。该流程只读取 LDP 或已有 `input_links`，把训练用图片复制到项目本地数据目录，不修改 LDP 原始目录：
 

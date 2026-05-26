@@ -201,7 +201,7 @@ def link_or_copy_image(source: Path, destination: Path, mode: str) -> None:
         shutil.copy2(source, destination)
         return
     try:
-        destination.symlink_to(source)
+        destination.symlink_to(source.resolve())
     except OSError:
         shutil.copy2(source, destination)
 

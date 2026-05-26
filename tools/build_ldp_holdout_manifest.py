@@ -13,13 +13,22 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build a deterministic LDP holdout manifest from ROI predictions.")
-    parser.add_argument("--predictions", type=Path, required=True)
+    parser = argparse.ArgumentParser(description="Build a deterministic LDP holdout manifest.")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--predictions", type=Path, help="ROI prediction JSONL to sample from.")
+    source.add_argument("--source-root", type=Path, help="LDP root directory with one folder per class.")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--per-class", type=int, default=100)
     parser.add_argument("--seed", type=int, default=20260523)
+    parser.add_argument(
+        "--classes",
+        nargs="+",
+        help="Class folders to sample. Defaults to every image-containing folder when --source-root is used.",
+    )
     return parser.parse_args()
 
 
@@ -41,15 +50,50 @@ def record_key(record: dict[str, Any]) -> str:
     return str(Path(str(record.get("original_source") or record.get("source"))).resolve())
 
 
-def main() -> None:
-    args = parse_args()
-    rng = random.Random(args.seed)
+def group_prediction_records(path: Path) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for record in read_jsonl(args.predictions):
+    for record in read_jsonl(path):
         key = record_key(record)
         if not key:
             continue
         grouped[record_class(record)].append(record)
+    return grouped
+
+
+def group_source_records(source_root: Path, classes: list[str] | None) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    class_dirs = [source_root / class_name for class_name in classes] if classes else sorted(
+        path for path in source_root.iterdir() if path.is_dir()
+    )
+    for class_dir in class_dirs:
+        if not class_dir.exists():
+            raise FileNotFoundError(f"Class directory not found: {class_dir}")
+        class_name = class_dir.name
+        for image_path in sorted(path for path in class_dir.iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS):
+            resolved = image_path.resolve()
+            grouped[class_name].append(
+                {
+                    "source": str(resolved),
+                    "original_source": str(resolved),
+                    "source_key": str(resolved),
+                    "class_name": class_name,
+                    "final_confidence": None,
+                    "action": None,
+                    "flags": [],
+                }
+            )
+    return grouped
+
+
+def main() -> None:
+    args = parse_args()
+    rng = random.Random(args.seed)
+    if args.predictions is not None:
+        grouped = group_prediction_records(args.predictions)
+        source_description = str(args.predictions.resolve())
+    else:
+        grouped = group_source_records(args.source_root, args.classes)
+        source_description = str(args.source_root.resolve())
 
     selected = []
     counts: Counter[str] = Counter()
@@ -75,11 +119,15 @@ def main() -> None:
         encoding="utf-8",
     )
     summary = {
-        "predictions": str(args.predictions.resolve()),
+        "predictions": str(args.predictions.resolve()) if args.predictions else None,
+        "source_root": str(args.source_root.resolve()) if args.source_root else None,
+        "source": source_description,
         "out": str(args.out.resolve()),
         "per_class": args.per_class,
         "seed": args.seed,
+        "classes": args.classes,
         "counts": dict(counts),
+        "available_counts": {class_name: len(records) for class_name, records in sorted(grouped.items())},
         "total": len(selected),
     }
     summary_path = args.out.with_suffix(".summary.json")

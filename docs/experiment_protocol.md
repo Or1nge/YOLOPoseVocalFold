@@ -108,7 +108,7 @@ pytest tests/test_dinov3_keypoint_aux.py
 
 ### 历史 LDP pseudo 两阶段数据设计
 
-以下为 2026-05-23 的历史消融流程，已不再作为当前推荐 contrast 训练方案。经验教训记录在 `docs/contrast_experiment_lessons_20260523.md`，旧 `Results/` 产物已清理：
+以下为 2026-05-23 的历史消融流程，已不再作为当前推荐 contrast 训练方案。经验教训记录在 `docs/contrast_experiment_lessons_20260523.md`，旧 `Results/` 产物和本地 `data/yolo_pose_stage2_ldp_conf040_holdout100/` 物化数据集已清理：
 
 1. Stage 1 用 `data/yolo_pose_mixed_negative_60` 训练/验证 ROI 定位能力。这套数据只包含人工三点标注 split 和 60 张混杂图片空标签负样本。
 2. Stage 2 用 `data/yolo_pose_stage2_ldp_conf040_holdout100` 做 LDP 辅助微调。该数据集复制 Stage 1 数据，再追加 LDP pseudo-positive 和 LDP 混杂负样本。

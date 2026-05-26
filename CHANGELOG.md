@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Fixed manual split ROI evaluation for `predict_roi.py` outputs by mapping GT
+  bbox/keypoints/manual ROI polygons through the saved crop+blackpad preprocess
+  metadata before computing metrics.
+- Trained and evaluated the 120 blackpad mixed-negative containment run; saved
+  `best.pt` under `Results/containment_loss/yolo_pose_glottic_three_point_y11m_img960_pose24_containment_l0p05_mixedneg120_blackpad/weights/`
+  and documented the validation/holdout tradeoff in
+  `docs/mixedneg120_blackpad_training_20260525.md`.
+- Rebuilt the LabelMe-derived YOLO-Pose GT split from 396 valid blackpad samples (`277/79/40`) and added `data/yolo_pose_mixed_negative_120_blackpad` with 120 holdout-excluded LDP mixed-image negatives plus a matching containment training config.
+- Cleaned local data/results artifacts: retained the source LabelMe bundle, GT splits, fixed LDP holdout, current V1.1/V1.2 and DINO/no-DINO model aliases, and removed superseded contrast/DINO/evaluation payloads documented in `docs/artifact_cleanup_20260524.md`.
 - Changed ROI prediction preprocessing to required `V1.2`: crop existing black borders first, then always add the uniform black border before YOLO-Pose; prediction JSONL now records the shared preprocess metadata contract including `crop_bbox_xyxy`, `crop_was_applied`, `cropped_source`, `padding_fraction`, `model_input_width/height`, and `no_black_bbox_in_model_input`.
 - Updated DINOv3 auxiliary scoring to read no-black/cropped images before padded `source`, transform YOLO padded keypoints back into cropped coordinates, and keep the auxiliary score available for final confidence/action gating.
 - Changed DINOv3 valid-mask sampling so out-of-image oriented patch locations are not clamped to edge pixels; incomplete 48x48 point patches now carry invalid mask cells and zeroed features.
