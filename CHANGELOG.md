@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added screen-photo pre-crop to the ROI prediction pipeline: `tools/predict_roi.py` now classifies each image as a clean frame or a messy phone-photo-of-screen (via fixed-color stripe and blue-region signals), and when triggered, crops out the laryngoscope window before the existing black-border crop + blackpad step. The reusable detection/cropping logic lives in `yoloposevf/screen_photo_crop.py`; the `scripts/crop_527_xianlin.py` standalone pre-cropper imports from it. JSONL outputs carry a new `pre_crop` audit section, mirrored under `preprocess.pre_crop`, while preserving the existing `source`/`original_source`/`cropped_source`/`dinov3_source` contract; `tools/crop_rois_from_predictions.py` can now use `--copy-original-source cropped_source` for screen-photo fallback images.
+
+- Made `tools/predict_roi.py` default to GPU 0 for YOLO-Pose inference; pass
+  `--device cpu` only when CPU inference is explicitly needed.
 - Fixed manual split ROI evaluation for `predict_roi.py` outputs by mapping GT
   bbox/keypoints/manual ROI polygons through the saved crop+blackpad preprocess
   metadata before computing metrics.

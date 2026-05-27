@@ -288,7 +288,11 @@ python tools/predict_roi.py \
 V1.2 的预测前处理会先按低亮度前景框裁掉已有黑边，再把裁后图按长边 30%、最少 80 px 加四周黑边；这个 black pad 是 YOLO-Pose 的必经输入步骤。黑边图写到
 `<out_stem>_blackpad_inputs/`，裁后 no-black 图写到 `<out_stem>_cropped_inputs/`，预测坐标基于黑边图。JSONL 中 `source` 指向黑边图，`dinov3_source`/`cropped_source` 指向裁后图，
 `original_source` 保留原图路径，`preprocess.type` 固定为 `crop_black_border_then_blackpad`，并记录原图尺寸、`crop_bbox_xyxy`、是否实际裁剪、裁后尺寸、`padding_px`、padding 规则、`model_input_width/height` 和 `no_black_bbox_in_model_input`。DINO 后续只使用 `dinov3_source`/`cropped_source` 对应的 no-black 图，按 `padding_px` 把 YOLO keypoints 转回 cropped 坐标。
-目录或列表输入会逐张流式推理并逐行写出 JSONL，避免大批量路径一次性送入 YOLO 时占满显存。
+
+从 V1.2 开始，`tools/predict_roi.py` 还会在 black-border crop + blackpad 之前自动检测并对手机翻拍屏幕图片做预裁剪（screen-photo pre-crop）。检测逻辑通过固定色条纹（stripe_col/stripe_row > 0.24）和蓝色区域（blue_col/blue_row > 0.06）判断是否为翻拍图；若触发则先裁出喉镜窗口区域（tissue bbox → window frame → trim UI edges），再把裁后图送进黑边裁剪和加黑边流程。预裁剪中间图写到 `<out_stem>_precrop_inputs/`。每条 JSONL 输出的 `pre_crop` 字段记录触发状态（`triggered`）、模式（`mode`）、触发原因（`reason`）、裁剪框（`box_xyxy`）、信号值（`signals`）、原始尺寸和预裁后尺寸；同一份信息也写入 `preprocess.pre_crop`，方便连同 V1.2 前处理一起审查。未触发的图片 `pre_crop.triggered` 为 `false`、`mode` 为 `"none"`。`original_source` 始终指向最原始图像（翻拍前），`source`/`dinov3_source`/`cropped_source` 的语义不变。
+
+可复用检测和裁剪逻辑位于 `yoloposevf/screen_photo_crop.py`，提供 `classify_screen_photo()` 和 `crop_screen_photo_window()` 两个公共接口。独立批量预裁剪预览（含 contact sheet）仍可通过 `scripts/crop_527_xianlin.py` 使用。
+目录或列表输入会逐张流式推理并逐行写出 JSONL，避免大批量路径一次性送入 YOLO 时占满显存。YOLO-Pose 推理默认使用 GPU 0；只有明确需要 CPU 时才传 `--device cpu`。
 
 固定 JSONL holdout/manifest 推理可用 `--manifest`，脚本会优先读取每行的 `original_source`、`source_key`、`source`：
 
@@ -396,6 +400,8 @@ python tools/crop_rois_from_predictions.py \
   --output-size 224 \
   --crop-mode polygon
 ```
+
+如果输入中包含手机翻拍屏幕图，fallback/保留原图时可改用 `--copy-original-source cropped_source`，让下游分类模型看到预裁剪且去黑边后的喉镜窗口，而不是完整手机照片。
 
 训练完 4-class 分类模型后，可用下列工具在外部文件夹数据集上评估单个 checkpoint：
 

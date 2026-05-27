@@ -140,5 +140,44 @@ def test_prediction_preprocess_always_crops_then_blackpads(tmp_path) -> None:
     assert record["preprocess"]["type"] == "crop_black_border_then_blackpad"
     assert record["preprocess"]["crop_bbox_xyxy"] == [4, 3, 16, 9]
     assert record["preprocess"]["padding_px"] == 6
+    assert record["pre_crop"]["triggered"] is False
+    assert record["pre_crop"]["reason"] == ["none"]
+    assert record["preprocess"]["pre_crop"] == record["pre_crop"]
     with Image.open(images[0]) as image:
         assert image.size == (24, 18)
+
+
+def test_prediction_preprocess_records_screen_photo_precrop(tmp_path) -> None:
+    source_dir = tmp_path / "images"
+    source_dir.mkdir()
+    source = source_dir / "screen_photo.png"
+    image = Image.new("RGB", (400, 300), color=(20, 20, 20))
+    for y in range(50, 250):
+        for x in range(150, 360):
+            image.putpixel((x, y), (180, 55, 35))
+    for y in range(300):
+        for x in range(390, 400):
+            image.putpixel((x, y), (30, 60, 180))
+    image.save(source)
+
+    images, metadata = prepare_inference_images(
+        source_dir,
+        manifest=None,
+        out_path=tmp_path / "predictions.jsonl",
+        blackpad_input_dir=None,
+        cropped_input_dir=None,
+        precrop_input_dir=None,
+        blackpad_fraction=0.30,
+        blackpad_min_padding=20,
+        black_border_luma_floor=8.0,
+    )
+
+    record = metadata[str(images[0].resolve())]
+    pre_crop = record["pre_crop"]
+    assert pre_crop["triggered"] is True
+    assert pre_crop["mode"] == "screen_photo_precrop"
+    assert "blue_col" in pre_crop["reason"]
+    assert pre_crop["original_width"] == 400
+    assert pre_crop["original_height"] == 300
+    assert pre_crop["cropped_width"] < 400
+    assert record["preprocess"]["pre_crop"] == pre_crop

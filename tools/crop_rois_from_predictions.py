@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--copy-original-source",
-        choices=["source", "original_source"],
+        choices=["source", "original_source", "cropped_source"],
         default="source",
         help="Which record path to use when retaining/falling back to an original image.",
     )
@@ -181,8 +181,8 @@ def save_original_image(source: Path, destination: Path, *, output_size: int, qu
 
 
 def original_source_for_record(record: dict[str, Any], source: Path, mode: str) -> Path:
-    if mode == "original_source":
-        original = record.get("original_source")
+    if mode in {"original_source", "cropped_source"}:
+        original = record.get(mode)
         if original:
             return Path(str(original))
     return source
