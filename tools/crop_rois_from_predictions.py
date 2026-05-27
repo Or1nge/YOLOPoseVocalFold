@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--copy-original-source",
-        choices=["source", "original_source"],
+        choices=["source", "original_source", "cropped_source"],
         default="source",
         help="Which record path to use when retaining/falling back to an original image.",
     )
@@ -122,7 +122,11 @@ def crop_polygon(image: Image.Image, polygon: Sequence[Sequence[float]]) -> Imag
         return None
 
     width, height = polygon_size(polygon)
-    source = np.asarray([[float(x), float(y)] for x, y in polygon], dtype=np.float32)
+    # ROI polygons are ordered as anterior/base edge followed by posterior/far edge.
+    # Export crops with the anterior commissure at the bottom, so the
+    # anterior-to-posterior bisector points upward in the generated crop.
+    source_points = [polygon[3], polygon[2], polygon[1], polygon[0]]
+    source = np.asarray([[float(x), float(y)] for x, y in source_points], dtype=np.float32)
     target = np.asarray(
         [[0.0, 0.0], [width - 1.0, 0.0], [width - 1.0, height - 1.0], [0.0, height - 1.0]],
         dtype=np.float32,
@@ -177,8 +181,8 @@ def save_original_image(source: Path, destination: Path, *, output_size: int, qu
 
 
 def original_source_for_record(record: dict[str, Any], source: Path, mode: str) -> Path:
-    if mode == "original_source":
-        original = record.get("original_source")
+    if mode in {"original_source", "cropped_source"}:
+        original = record.get(mode)
         if original:
             return Path(str(original))
     return source

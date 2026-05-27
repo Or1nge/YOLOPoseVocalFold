@@ -13,7 +13,7 @@ data/
 ```
 
 当前黑边增强标注集放在
-`data/glottic_roi_rectangle_annotation_200_20260520_blackpad/images/`，图片和 LabelMe JSON 同目录。实际可用配对样本为 196 个；`039`, `057`, `100`, `124` 在 manifest 中有记录但当前目录没有图片/JSON。
+`data/glottic_roi_rectangle_annotation_200_20260520_blackpad/images/`，图片和 LabelMe JSON 同目录。2026-05-25 重建时共有 396 对图片/JSON 可按当前三点+旋转框协议转换，得到 `data/yolo_pose/` 的 `train/val/test = 277/79/40`。
 
 转换后 YOLO-Pose 数据集结构：
 
@@ -29,16 +29,16 @@ data/yolo_pose/
 
 `roi_polygons` 保存人工 `声门区域` 旋转框四角，用于评价三点角平分线生成 ROI 的 87% 覆盖率与面积比例。
 
-负样本数据集约定：
+当前主要负样本数据集约定：
 
 ```text
-data/yolo_pose_mixed_negative_60/
-  images/train/mixed_negative_*.jpg
-  labels/train/mixed_negative_*.txt  # 空文件，表示背景/无声门 ROI
+data/yolo_pose_mixed_negative_120_blackpad/
+  images/train/mixed_negative120_blackpad_*.jpg
+  labels/train/mixed_negative120_blackpad_*.txt  # 空文件，表示背景/无声门 ROI
   negative_samples_manifest.{csv,json}
 ```
 
-这些负样本只从 LDP `混杂图片` 只读复制，不修改 LDP 原目录。
+这些负样本只从 LDP `混杂图片` 只读复制，不修改 LDP 原目录；当前 120 张版本使用 `--blackpad-negatives`，并通过固定 LDP holdout manifest 排除了 holdout 样本。
 
 LDP pseudo 微调数据集约定：
 

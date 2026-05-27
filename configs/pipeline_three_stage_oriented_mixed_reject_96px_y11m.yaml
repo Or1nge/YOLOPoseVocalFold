@@ -1,0 +1,6 @@
+pretrain_config: configs/pretrain_oriented_keypoint_contrast_manual_only_96px_y11m.yaml
+stage2_config: configs/train_stage2_mixed_hard_negative_96px_y11m.yaml
+stage3_config: configs/train_stage3_pose_after_mixed_hard_negative_96px_y11m.yaml
+lambda_containment: 0.05
+device: 0
+enable_unstable_loss_hook: true

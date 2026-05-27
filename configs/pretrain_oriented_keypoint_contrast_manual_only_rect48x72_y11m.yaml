@@ -1,0 +1,42 @@
+model: yolo11m-pose.pt
+data: data/yolo_pose/vocal_fold_pose.yaml
+project: Results/three_stage_oriented_contrast/pretrain
+name: yolo11m_manual_only_oriented_kp_contrast_rect48x72
+imgsz: 960
+epochs: 40
+batch: 16
+workers: 8
+device: 0
+seed: 42
+exist_ok: false
+
+feature_index: 0
+local_contrast_weight: 1.0
+# Canonical x is perpendicular to the A-to-posterior bisector; canonical y follows it.
+# A: 48 wide x 72 long along the bisector. L/R: 72 wide perpendicular x 48 along.
+patch_size_input:
+  - [48.0, 72.0]
+  - [72.0, 48.0]
+  - [72.0, 48.0]
+patch_output_size: 5
+local_projection_hidden_dim: 512
+local_projection_dim: 128
+temperature: 0.10
+negative_count: 12
+negative_min_distance: 0.12
+
+# Mixed/reject pressure is handled in stage 2; keep stage 1 purely about A/L/R.
+image_reject_weight: 0.0
+image_reject_ce_weight: 0.0
+global_projection_hidden_dim: 256
+global_projection_dim: 128
+reject_hidden_dim: 128
+
+augment_degrees: 4.0
+augment_scale: 0.06
+augment_translate: 0.025
+augment_brightness: 0.08
+augment_contrast: 0.12
+
+learning_rate: 0.0001
+weight_decay: 0.0001

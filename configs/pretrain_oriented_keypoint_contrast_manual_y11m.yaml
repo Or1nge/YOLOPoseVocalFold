@@ -1,0 +1,42 @@
+model: yolo11m-pose.pt
+data: data/yolo_pose_mixed_negative_60/vocal_fold_pose.yaml
+project: Results/oriented_keypoint_contrast_pretrain
+name: yolo11m_manual_oriented_kp_contrast_48px_mixedreject
+imgsz: 960
+epochs: 40
+batch: 16
+workers: 8
+device: 0
+seed: 42
+exist_ok: false
+
+# Use the highest-resolution pose-head input feature map.
+feature_index: 0
+
+# Main objective: A/L/R local anatomy should remain itself across mild views.
+local_contrast_weight: 1.0
+patch_size_input: 48.0
+patch_output_size: 5
+local_projection_hidden_dim: 512
+local_projection_dim: 128
+temperature: 0.10
+negative_count: 12
+negative_min_distance: 0.12
+
+# Secondary objective: empty-label mixed images should separate from non-mixed images.
+image_reject_weight: 0.15
+image_reject_ce_weight: 0.5
+global_projection_hidden_dim: 256
+global_projection_dim: 128
+reject_hidden_dim: 128
+
+# No flips. Geometry perturbation is mild and keypoints are transformed, then local
+# patches are sampled in the canonical anterior-to-posterior anatomical frame.
+augment_degrees: 4.0
+augment_scale: 0.06
+augment_translate: 0.025
+augment_brightness: 0.08
+augment_contrast: 0.12
+
+learning_rate: 0.0001
+weight_decay: 0.0001

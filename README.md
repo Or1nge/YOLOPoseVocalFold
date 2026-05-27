@@ -66,18 +66,22 @@ python tools/convert_labelme_to_yolo_pose.py \
 python tools/validate_dataset.py --dataset-dir data/yolo_pose
 ```
 
-如果确认 `混杂图片` 都没有声带区域，可把它们作为 YOLO-Pose 负样本加入训练集。负样本图片复制到新数据集的 `images/train/`，对应 `labels/train/*.txt` 保持空文件，表示背景/无声门 ROI：
+如果确认 `混杂图片` 都没有声带区域，可把它们作为 YOLO-Pose 负样本加入训练集。当前重建版本加入 120 张黑边增强混杂负样本，并排除固定 LDP holdout，负样本图片复制到新数据集的 `images/train/`，对应 `labels/train/*.txt` 保持空文件，表示背景/无声门 ROI：
 
 ```bash
 python tools/add_negative_images_to_yolo_pose.py \
   --base-dataset data/yolo_pose \
   --negative-source-dir /home/or1ngelinux/CVProjects/Larynx/Laryngeal_Dataset_Processed/混杂图片 \
-  --out-dir data/yolo_pose_mixed_negative_60 \
-  --count 60 \
-  --seed 20260522
+  --out-dir data/yolo_pose_mixed_negative_120_blackpad \
+  --count 120 \
+  --seed 20260525 \
+  --exclude-manifest data/ldp_holdout/ldp_holdout_100_per_class_seed20260525.jsonl \
+  --prefix mixed_negative120_blackpad \
+  --blackpad-negatives \
+  --overwrite
 ```
 
-带 60 张混杂负样本的训练配置在 `configs/train_containment_mixed_negative_y11m.yaml`。
+带 120 张黑边混杂负样本的训练配置在 `configs/train_containment_mixed_negative_120_blackpad_y11m.yaml`。
 
 如果要让 LDP 参与微调，同时强惩罚 `混杂图片` 误检，可先用上一轮 LDP 八分类预测结果构造 pseudo 数据集。该流程只读取 LDP 或已有 `input_links`，把训练用图片复制到项目本地数据目录，不修改 LDP 原始目录：
 
@@ -87,14 +91,14 @@ python tools/build_ldp_pseudo_pose_dataset.py \
   --predictions Results/ldp_8class_roi_crop_mixedneg60_auto043_20260522_073221/predictions.jsonl \
   --out-dir data/yolo_pose_ldp_pseudo_mixedpenalty_copy \
   --positive-actions auto_accept manual_review \
-  --min-positive-confidence 0.30 \
+  --min-positive-confidence 0.40 \
   --negative-repeat 1 \
   --hard-negative-repeat 8 \
   --copy-mode copy \
   --overwrite
 ```
 
-对应微调配置为 `configs/train_containment_ldp_pseudo_mixedpenalty_copy_y11m.yaml`。当前约定是：非 `混杂图片` 的 `auto_accept`/`manual_review` 且 `final_confidence >= 0.30` 作为 pseudo-positive；全部 `混杂图片` 作为空标签负样本；`混杂图片` 中曾被 `auto_accept` 的样本额外重复 8 次作为 hard negative。
+对应微调配置为 `configs/train_containment_ldp_pseudo_mixedpenalty_copy_y11m.yaml`。当前约定是：非 `混杂图片` 的 `auto_accept`/`manual_review` 且 `final_confidence > 0.40` 才作为 pseudo-positive；`<= 0.40` 的非混杂图不参与 pseudo 训练；全部 `混杂图片` 作为空标签负样本；`混杂图片` 中曾被 `auto_accept` 的样本额外重复 8 次作为 hard negative。
 
 ## 训练 baseline
 
@@ -145,10 +149,10 @@ min_roi_dark_fraction = 0.10
 good_roi_dark_fraction = 0.20
 ```
 
-`confidence_curve` 会同时作用于检测框置信度和关键点置信度；当前 `tanh` 曲线在 0.65 附近拉开中低置信度和高置信度，同时避免简单平方把 0.9 这类高置信度也压低太多。旧行为可用 `confidence_curve=power` 且 `confidence_gamma=2.0` 复现。ROI 面积和关键点图像边界 gate 用于降低明显非声带区域的“可用框”风险。ROI 相对面积的分母优先使用预测预处理元数据中的裁后有效区域，避免新加的统一黑边把有效面积稀释；没有预处理元数据时才回退到模型输入图的前景 bbox。
+`confidence_curve` 会同时作用于检测框置信度和关键点置信度；当前 `tanh` 曲线在 0.65 附近拉开中低置信度和高置信度，同时避免简单平方把 0.9 这类高置信度也压低太多。旧行为可用 `confidence_curve=power` 且 `confidence_gamma=2.0` 复现。ROI 面积和关键点图像边界 gate 用于降低明显非声带区域的“可用框”风险。ROI 相对面积的分母使用模型实际输入图裁掉黑边后的有效图像面积，不区分黑边是原图自带还是 V1.1 推理时额外加入。
 后处理不要求前联合 A 在图像 y 方向上低于 L/R 后方点；体位和镜头方向可能改变上下关系，三点只通过夹角、几何一致性、ROI 面积、图像边界和暗区比例等规则判断。
 三点夹角低于 `20°` 或高于 `130°` 时只作为温和几何扣分，不再直接把 `geometry_score` 置零；单独由夹角造成的最大惩罚约为乘以 `0.6`。
-启用 `roi_dark_fraction` 后，推理会额外检查预测旋转 ROI 内是否存在足够暗的声门样区域；该 gate 只使用预测框和模型输入图中的裁后有效区域像素，不依赖人工标注。当前默认使用相对亮度：先排除接近纯黑的人工黑边，再取整图前景中位灰度作为参考，像素灰度低于 `reference_luma * 0.80` 才计入暗区；`roi_dark_luma_threshold` 仅用于复现旧的 absolute 模式。
+启用 `roi_dark_fraction` 后，推理会额外检查预测旋转 ROI 内是否存在足够暗的声门样区域；该 gate 只使用预测框和原图像素，不依赖人工标注。当前默认使用相对亮度：先排除接近纯黑的人工黑边，再取整图前景中位灰度作为参考，像素灰度低于 `reference_luma * 0.80` 才计入暗区；`roi_dark_luma_threshold` 仅用于复现旧的 absolute 模式。
 
 本机如果数据放在 main checkout，可这样启动单个 lambda：
 
@@ -161,9 +165,113 @@ python tools/train_keypoint_containment.py \
   --enable-unstable-loss-hook
 ```
 
+## Keypoint-Level Local Contrast
+
+实验分支 `exp/keypoint-local-contrast` 改为三阶段流程。新的主流程不再把 LDP pseudo-positive 三点拉入 contrast 训练；LDP 只以混杂图片负样本形式进入 hard-negative 阶段：
+
+```text
+Stage 1: 人工三点有向局部 contrast pretrain
+Stage 2: 随机 200 张 LDP 混杂图片 blackpad 空标签 hard-negative 训练
+Stage 3: 常规 YOLO-Pose + containment fine-tune
+```
+
+第一阶段在 YOLO neck/head 输入特征图上，根据人工 A/L/R 三点计算前联合到左右后方中点 midpoint 的角平分线方向，然后在每个点附近采样约 `48x48` 输入像素足迹的有向局部 patch。patch 会按解剖方向摆正后进入 projection head，只拉近“同一图像、同一解剖点、两种轻增强视图”的 embedding：
+
+```text
+A_view1 <-> A_view2
+L_view1 <-> L_view2
+R_view1 <-> R_view2
+```
+
+A/L/R 三个点不会互相当作正样本。第二阶段使用 `data/yolo_pose_mixed_negative_ldp200_blackpad_holdout_excluded`，即人工三点训练集加上排除 LDP holdout 后随机抽取的 200 张 LDP `混杂图片` blackpad 空标签负样本；非混杂 LDP pseudo-positive 不进入训练。第三阶段使用 `data/yolo_pose_mixed_negative_60_blackpad`。
+
+先做快速检查：
+
+```bash
+python tools/pretrain_oriented_contrast.py \
+  --config configs/pretrain_oriented_keypoint_contrast_manual_only_y11m.yaml \
+  --dry-run
+```
+
+构造混杂负样本数据集：
+
+```bash
+python tools/add_negative_images_to_yolo_pose.py \
+  --base-dataset data/yolo_pose \
+  --negative-source-dir /home/or1ngelinux/CVProjects/Larynx/Laryngeal_Dataset_Processed/混杂图片 \
+  --out-dir data/yolo_pose_mixed_negative_ldp200_blackpad_holdout_excluded \
+  --count 200 \
+  --seed 20260523 \
+  --exclude-manifest data/ldp_holdout/ldp_holdout_100_per_class_seed20260523.jsonl \
+  --prefix ldp_mixed_negative_blackpad \
+  --blackpad-negatives \
+  --overwrite
+```
+
+完整跑法：
+
+```bash
+python tools/run_three_stage_oriented_mixed_reject_pipeline.py \
+  --config configs/pipeline_three_stage_oriented_mixed_reject_y11m.yaml
+```
+
+旧 contrast 结果已清理，经验教训保留在 `docs/contrast_experiment_lessons_20260523.md`。历史 LDP pseudo contrast 不再作为当前推荐实验流程。
+
+2026-05-23 三阶段 200 张 blackpad 混杂负样本实测结果见 `docs/three_stage_oriented_mixed_reject_evaluation_20260523.md`。结论：该版 native pose test 指标高于 no-contrast baseline，但 LDP holdout `混杂图片` false-positive 升到 8%，不应替代当前 V1.1 ROI 模型。
+
+2026-05-24 额外测试 `96x96` 有向局部 patch，记录见 `docs/three_stage_oriented_mixed_reject_96px_evaluation_20260524.md`。结论：contrast pretrain loss 下降，但 native test 和 LDP holdout 基本不变，manual ROI postprocess 明显变差，不推荐替代 48px 实验或 V1.1。
+
+2026-05-24 额外测试关键点特异长方形 patch：A 为 `48x72`，L/R 为 `72x48`，记录见 `docs/three_stage_oriented_mixed_reject_rect48x72_evaluation_20260524.md`。结论：训练验证指标与 96px 接近，但 manual ROI postprocess 和 LDP 混杂误接收没有改善。
+
+2026-05-24 继续测试更小的长方形 patch：A 为 `36x60`，L/R 为 `60x36`，记录见 `docs/three_stage_oriented_mixed_reject_rect36x60_evaluation_20260524.md`。结论：Stage 1 contrast loss 更弱，后续 native/manual/LDP 结果仍与 48x72 版重合，不推荐继续沿单纯框尺寸方向试。
+
+历史注记：LDP pseudo-positive contrast 流程已废弃，旧结果目录已清理；经验教训统一保留在 `docs/contrast_experiment_lessons_20260523.md`。当时的 `0.4` 只用于筛选哪些 LDP 非混杂图片可进入 pseudo-positive 数据集，不是最终 ROI 算法阈值；最终 reject/manual_review 阈值仍来自 `configs/postprocess.yaml`，当前 `review_threshold: 0.30`。
+
+`data/ldp_holdout/ldp_holdout_100_per_class_seed20260523.jsonl` 从 LDP 八类各固定抽 100 张，只用于最终评估，不进入 pseudo-positive、mixed negative 或 hard-negative 训练。
+
+## DINOv3 Three-Point Auxiliary Judgement
+
+实验分支 `exp/dinov3-keypoint-aux` 用 DINOv3 辅助判定三点，替代继续加码 keypoint-local contrast。该设计冻结 DINOv3 dense encoder，只训练一个小 head：
+
+```text
+image -> frozen DINOv3 dense features
+      -> oriented point-region head: background / anterior / left posterior / right posterior
+```
+
+左后方和右后方不被当作彼此的正样本；病变造成的不对称性应被保留。DINOv3 只提供高维局部语义特征，三点监督仍来自人工 YOLO-Pose 标签。当前 active 版本只训练点区域四分类，不再训练 triplet head 或 image reject head；hard negative 来自排除 holdout 后的混杂图误检点和关键点邻域 near-miss 背景。DINO 训练/打分改为看裁掉已有黑边后的 no-black/cropped 图像；prediction JSONL 会优先提供 `dinov3_source`/`cropped_source`，DINO 评分时把 YOLO padded 坐标减去 `preprocess.padding_px` 后再采样。点区域 head 会同时采样一张有效像素 mask，让 48x48 有向局部 patch 中的 letterbox padding、超出真实图像边界的位置，以及可选 luma-floor 黑区不作为正常组织特征参与判断。
+
+默认配置用 `timm/vit_small_patch16_dinov3.lvd1689m` 这份公开 DINOv3 ViT-S/16 权重。官方 `facebook/dinov3-vits16-pretrain-lvd1689m` 仓库是 gated；如果已经获得访问权限，也可以把 `dinov3.backend` 改成 `transformers` 并使用官方模型 id。
+
+快速检查：
+
+```bash
+python tools/train_dinov3_keypoint_aux.py \
+  --config configs/train_dinov3_keypoint_aux_y11m.yaml \
+  --dry-run
+```
+
+训练 auxiliary head：
+
+```bash
+python tools/train_dinov3_keypoint_aux.py \
+  --config configs/train_dinov3_keypoint_aux_y11m.yaml
+```
+
+给已有推理结果追加 DINOv3 分数：
+
+```bash
+python tools/score_predictions_with_dinov3_aux.py \
+  --aux-checkpoint Results/dinov3_keypoint_aux/dinov3_vits16_oriented_point_region_hardneg_448_ldp200/weights/best_aux_head.pt \
+  --predictions Results/predictions/predictions.jsonl \
+  --out Results/predictions/predictions_dinov3_aux.jsonl
+```
+
+默认只追加 `dinov3_aux` 字段，不改变原来的 `final_confidence/action`。需要让 auxiliary score 修改置信度时，再加 `--apply-confidence-gate`。设计说明见 `docs/dinov3_keypoint_aux_design_20260524.md`。
+当前 gate 只做正向证据：`point_region_score < 0.30` 不改变原置信度，`0.30-0.60` 按比例从 `1.0x` 奖励到 `1.5x`，`>=0.60` 作为极高分 DINO 直接通过候选；DINO 低分不再直接拒绝。2026-05-24 评估见 `docs/dinov3_point_region_hardneg_evaluation_20260524.md`。
+
 ## 推理
 
-当前推荐 ROI 定位算法版本为 `V1.2`：使用 `vf_roi_v1` 权重，并在每张输入图像进入模型前统一做“裁已有近纯黑边 -> 给裁后矩形加四周黑边”。
+当前推荐 ROI 定位算法版本为 `V1.2`：使用 `vf_roi_v1` 权重，并在每张输入图像进入模型前先裁掉已有黑边，再对裁后的矩形有效图像自动增加四周统一黑边。
 
 ```text
 Results/models/vf_roi_v1/best.pt
@@ -177,15 +285,38 @@ python tools/predict_roi.py \
   --out Results/predictions/val_predictions.jsonl
 ```
 
-V1.2 的前处理会先按亮度 floor 保守裁掉原图自带的近纯黑边，再把裁后的矩形图按长边 30%、最少 80 px 加四周黑边。这个统一 blackpad 是 YOLO-Pose 推理的必需输入步骤，不提供跳过路径。YOLO 实际输入写到 `<out_stem>_blackpad_inputs/`，无已有黑边的裁后图写到 `<out_stem>_cropped_inputs/`，预测坐标基于黑边图。JSONL 中 `source` 指向 YOLO 实际输入图，`cropped_source` 指向裁后无已有黑边图，`original_source` 保留原图路径，`preprocess` 记录原图尺寸、裁剪 bbox、裁后尺寸、padding、无黑边区域在模型输入中的 bbox 和最终模型输入尺寸。
-目录或列表输入会逐张流式推理并逐行写出 JSONL，避免大批量路径一次性送入 YOLO 时占满显存。
+V1.2 的预测前处理会先按低亮度前景框裁掉已有黑边，再把裁后图按长边 30%、最少 80 px 加四周黑边；这个 black pad 是 YOLO-Pose 的必经输入步骤。黑边图写到
+`<out_stem>_blackpad_inputs/`，裁后 no-black 图写到 `<out_stem>_cropped_inputs/`，预测坐标基于黑边图。JSONL 中 `source` 指向黑边图，`dinov3_source`/`cropped_source` 指向裁后图，
+`original_source` 保留原图路径，`preprocess.type` 固定为 `crop_black_border_then_blackpad`，并记录原图尺寸、`crop_bbox_xyxy`、是否实际裁剪、裁后尺寸、`padding_px`、padding 规则、`model_input_width/height` 和 `no_black_bbox_in_model_input`。DINO 后续只使用 `dinov3_source`/`cropped_source` 对应的 no-black 图，按 `padding_px` 把 YOLO keypoints 转回 cropped 坐标。
+
+从 V1.2 开始，`tools/predict_roi.py` 还会在 black-border crop + blackpad 之前自动检测并对手机翻拍屏幕图片做预裁剪（screen-photo pre-crop）。检测逻辑通过固定色条纹（stripe_col/stripe_row > 0.24）和蓝色区域（blue_col/blue_row > 0.06）判断是否为翻拍图；若触发则先裁出喉镜窗口区域（tissue bbox → window frame → trim UI edges），再把裁后图送进黑边裁剪和加黑边流程。预裁剪中间图写到 `<out_stem>_precrop_inputs/`。每条 JSONL 输出的 `pre_crop` 字段记录触发状态（`triggered`）、模式（`mode`）、触发原因（`reason`）、裁剪框（`box_xyxy`）、信号值（`signals`）、原始尺寸和预裁后尺寸；同一份信息也写入 `preprocess.pre_crop`，方便连同 V1.2 前处理一起审查。未触发的图片 `pre_crop.triggered` 为 `false`、`mode` 为 `"none"`。`original_source` 始终指向最原始图像（翻拍前），`source`/`dinov3_source`/`cropped_source` 的语义不变。
+
+可复用检测和裁剪逻辑位于 `yoloposevf/screen_photo_crop.py`，提供 `classify_screen_photo()` 和 `crop_screen_photo_window()` 两个公共接口。独立批量预裁剪预览（含 contact sheet）仍可通过 `scripts/crop_527_xianlin.py` 使用。
+目录或列表输入会逐张流式推理并逐行写出 JSONL，避免大批量路径一次性送入 YOLO 时占满显存。YOLO-Pose 推理默认使用 GPU 0；只有明确需要 CPU 时才传 `--device cpu`。
+
+固定 JSONL holdout/manifest 推理可用 `--manifest`，脚本会优先读取每行的 `original_source`、`source_key`、`source`：
+
+```bash
+python tools/predict_roi.py \
+  --weights Results/models/vf_roi_v1/best.pt \
+  --manifest data/ldp_holdout/ldp_holdout_100_per_class_seed20260523.jsonl \
+  --postprocess-config Results/models/vf_roi_v1/postprocess.yaml \
+  --out Results/evaluation/vf_roi_v1_ldp_holdout/predictions.jsonl \
+  --device 0 \
+  --imgsz 960
+
+python tools/summarize_ldp_holdout_predictions.py \
+  --manifest data/ldp_holdout/ldp_holdout_100_per_class_seed20260523.jsonl \
+  --predictions Results/evaluation/vf_roi_v1_ldp_holdout/predictions.jsonl \
+  --out-dir Results/evaluation/vf_roi_v1_ldp_holdout
+```
 
 每条输出包含：
 
 - `bbox_yolo`
 - `bbox_keypoints`
 - `original_source`
-- `cropped_source`
+- `dinov3_source` / `cropped_source`
 - `preprocess`
 - `roi_polygon`: 由 3 点生成的角平分线旋转 ROI
 - `final_box_polygon`: 最终四点旋转框；一条边平行于前联合夹角的角平分线，左右宽度按两侧后方点到角平分线的投影分别扩张
@@ -256,7 +387,7 @@ python tools/crop_rois_from_predictions.py \
 ```
 
 如果分类模型需要统一看到正方形输入，可把所有 action 都尝试按预测框裁剪，并把裁剪图或无框 fallback
-原图拉伸到固定正方形。V1.2 黑边图只用于 ROI 定位；fallback 用 `original_source` 回到未加黑边的原图：
+原图拉伸到固定正方形。V1.1 黑边图只用于 ROI 定位；fallback 用 `original_source` 回到未加黑边的原图：
 
 ```bash
 python tools/crop_rois_from_predictions.py \
@@ -269,6 +400,8 @@ python tools/crop_rois_from_predictions.py \
   --output-size 224 \
   --crop-mode polygon
 ```
+
+如果输入中包含手机翻拍屏幕图，fallback/保留原图时可改用 `--copy-original-source cropped_source`，让下游分类模型看到预裁剪且去黑边后的喉镜窗口，而不是完整手机照片。
 
 训练完 4-class 分类模型后，可用下列工具在外部文件夹数据集上评估单个 checkpoint：
 

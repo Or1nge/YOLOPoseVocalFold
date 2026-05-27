@@ -22,6 +22,69 @@ from yoloposevf.yolo_labels import read_yolo_pose_label
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
 
+def transform_point_with_preprocess(point: tuple[float, float], preprocess: dict[str, object]) -> tuple[float, float]:
+    crop = preprocess.get("crop_bbox_xyxy")
+    if not isinstance(crop, list) or len(crop) < 2:
+        return point
+    padding = float(preprocess.get("padding_px") or 0.0)
+    return float(point[0]) - float(crop[0]) + padding, float(point[1]) - float(crop[1]) + padding
+
+
+def transform_bbox_with_preprocess(bbox: tuple[float, float, float, float], preprocess: dict[str, object]) -> tuple[float, float, float, float]:
+    x1, y1, x2, y2 = bbox
+    points = [
+        transform_point_with_preprocess((x1, y1), preprocess),
+        transform_point_with_preprocess((x2, y1), preprocess),
+        transform_point_with_preprocess((x2, y2), preprocess),
+        transform_point_with_preprocess((x1, y2), preprocess),
+    ]
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def transform_keypoints_with_preprocess(
+    keypoints: list[tuple[float, float, float]],
+    preprocess: dict[str, object],
+) -> list[tuple[float, float, float]]:
+    transformed = []
+    for keypoint in keypoints:
+        x, y = transform_point_with_preprocess((float(keypoint[0]), float(keypoint[1])), preprocess)
+        transformed.append((x, y, float(keypoint[2])))
+    return transformed
+
+
+def transform_polygon_with_preprocess(
+    polygon: object,
+    preprocess: dict[str, object],
+) -> list[list[float]] | None:
+    if not isinstance(polygon, list):
+        return None
+    transformed = []
+    for point in polygon:
+        if not isinstance(point, list) or len(point) < 2:
+            return None
+        x, y = transform_point_with_preprocess((float(point[0]), float(point[1])), preprocess)
+        transformed.append([x, y])
+    return transformed
+
+
+def image_size_from_prediction_or_target(prediction: dict[str, object], fallback: ImageSize) -> ImageSize:
+    image_size = prediction.get("image_size")
+    if isinstance(image_size, dict):
+        width = image_size.get("width")
+        height = image_size.get("height")
+        if width and height:
+            return ImageSize(int(width), int(height))
+    preprocess = prediction.get("preprocess")
+    if isinstance(preprocess, dict):
+        width = preprocess.get("model_input_width")
+        height = preprocess.get("model_input_height")
+        if width and height:
+            return ImageSize(int(width), int(height))
+    return fallback
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate postprocessed predictions against YOLO-Pose labels.")
     parser.add_argument("--predictions", type=Path, required=True)
@@ -93,18 +156,27 @@ def main() -> None:
             image_size = ImageSize(image.width, image.height)
         target = read_yolo_pose_label(label_path, image_size)
         roi_record = roi_metadata.get(label_path.stem, {})
+        metric_image_size = image_size_from_prediction_or_target(prediction, image_size)
+        target_bbox = target.bbox_xyxy
+        target_keypoints = target.keypoints
+        target_roi_polygon = roi_record.get("manual_roi_polygon")
+        preprocess = prediction.get("preprocess")
+        if isinstance(preprocess, dict):
+            target_bbox = transform_bbox_with_preprocess(target_bbox, preprocess)
+            target_keypoints = transform_keypoints_with_preprocess(target_keypoints, preprocess)
+            target_roi_polygon = transform_polygon_with_preprocess(target_roi_polygon, preprocess)
         samples.append(
             evaluate_sample(
                 source=label_path.stem,
                 predicted_bbox=predicted_bbox,
-                target_bbox=target.bbox_xyxy,
+                target_bbox=target_bbox,
                 predicted_keypoints=prediction.get("keypoints", []),
-                target_keypoints=target.keypoints,
-                image_size=image_size,
+                target_keypoints=target_keypoints,
+                image_size=metric_image_size,
                 action=str(prediction.get("action", "")),
                 final_confidence=float(prediction.get("final_confidence", 0.0)),
                 predicted_roi_polygon=predicted_box_polygon,
-                target_roi_polygon=roi_record.get("manual_roi_polygon"),
+                target_roi_polygon=target_roi_polygon,
             )
         )
 

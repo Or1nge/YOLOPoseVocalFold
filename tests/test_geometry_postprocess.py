@@ -273,32 +273,7 @@ def test_relative_dark_gate_ignores_synthetic_black_border(tmp_path) -> None:
     assert 0.0 < dark_fraction < 1.0
 
 
-def test_polygon_dark_fraction_can_ignore_artificial_padding_in_roi_mask(tmp_path) -> None:
-    from PIL import Image
-
-    image = Image.new("L", (12, 12), 0)
-    for y in range(2, 10):
-        for x in range(2, 10):
-            image.putpixel((x, y), 100)
-    path = tmp_path / "blackpad_with_clean_foreground.png"
-    image.save(path)
-
-    dark_fraction, threshold, reference_luma = polygon_dark_fraction(
-        path,
-        [(0, 0), (11, 0), (11, 11), (0, 11)],
-        75.0,
-        mode="relative_foreground_median",
-        relative_luma_ratio=0.70,
-        foreground_luma_floor=8.0,
-        analysis_bbox=(2.0, 2.0, 10.0, 10.0),
-    )
-
-    assert reference_luma == 100.0
-    assert threshold == 70.0
-    assert dark_fraction == 0.0
-
-
-def test_effective_area_from_metadata_prefers_preprocess_region(tmp_path) -> None:
+def test_effective_area_from_metadata_uses_model_input_foreground_bbox(tmp_path) -> None:
     from PIL import Image
 
     image = Image.new("L", (20, 20), 0)
@@ -322,60 +297,26 @@ def test_effective_area_from_metadata_prefers_preprocess_region(tmp_path) -> Non
         PostprocessConfig(roi_dark_foreground_luma_floor=8.0),
     )
 
-    assert area == 100.0
-    assert bbox == (5.0, 5.0, 15.0, 15.0)
-    assert mode == "preprocess_original_region"
+    assert area == 36.0
+    assert bbox == (7.0, 8.0, 13.0, 14.0)
+    assert mode == "input_foreground_bbox"
 
 
-def test_effective_area_from_metadata_uses_cropped_preprocess_region(tmp_path) -> None:
-    from PIL import Image
-
-    path = tmp_path / "model_input_crop_blackpad_sample.png"
-    Image.new("L", (40, 30), 0).save(path)
-
+def test_effective_area_from_metadata_uses_preprocess_no_black_content() -> None:
     area, bbox, mode = effective_area_from_metadata(
         {
-            "source": str(path),
-            "original_source": str(tmp_path / "raw.png"),
+            "source": "not_needed.png",
             "preprocess": {
                 "type": "crop_black_border_then_blackpad",
-                "padding_px": 7,
-                "original_width": 40,
-                "original_height": 30,
-                "crop_bbox_xyxy": [5, 4, 25, 16],
-                "cropped_width": 20,
-                "cropped_height": 12,
+                "padding_px": 10,
+                "cropped_width": 60,
+                "cropped_height": 40,
+                "no_black_bbox_in_model_input": [10, 10, 70, 50],
             },
         },
         PostprocessConfig(roi_dark_foreground_luma_floor=8.0),
     )
 
-    assert area == 240.0
-    assert bbox == (7.0, 7.0, 27.0, 19.0)
-    assert mode == "preprocess_cropped_region"
-
-
-def test_effective_area_from_metadata_prefers_no_black_bbox_metadata(tmp_path) -> None:
-    from PIL import Image
-
-    path = tmp_path / "model_input_crop_blackpad_sample.png"
-    Image.new("L", (40, 30), 0).save(path)
-
-    area, bbox, mode = effective_area_from_metadata(
-        {
-            "source": str(path),
-            "original_source": str(tmp_path / "raw.png"),
-            "preprocess": {
-                "type": "crop_black_border_then_blackpad",
-                "padding_px": 7,
-                "cropped_width": 20,
-                "cropped_height": 12,
-                "no_black_bbox_in_model_input": [7, 7, 27, 19],
-            },
-        },
-        PostprocessConfig(roi_dark_foreground_luma_floor=8.0),
-    )
-
-    assert area == 240.0
-    assert bbox == (7.0, 7.0, 27.0, 19.0)
-    assert mode == "preprocess_no_black_bbox"
+    assert area == 2400.0
+    assert bbox == (10.0, 10.0, 70.0, 50.0)
+    assert mode == "preprocess_no_black_content"

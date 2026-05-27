@@ -1,0 +1,48 @@
+data: data/yolo_pose_mixed_negative_ldp200_blackpad_holdout_excluded_gt396_seed20260525/vocal_fold_pose.yaml
+project: Results/dinov3_keypoint_aux
+name: dinov3_vits16_oriented_point_region_hardneg_448_ldp200_gt396_seed20260525
+imgsz: 448
+epochs: 30
+batch: 16
+workers: 8
+device: 0
+seed: 42
+exist_ok: false
+
+learning_rate: 0.001
+weight_decay: 0.0001
+hard_negative_predictions:
+  - Results/dinov3_keypoint_aux/hard_negative_mining_20260525/train_gt396_ldp200_seed20260525_predictions.jsonl
+
+dinov3:
+  backend: timm
+  timm_model_name: vit_small_patch16_dinov3.lvd1689m
+  repo_dir: null
+  model_name: dinov3_vits16
+  weights: null
+  transformers_model: facebook/dinov3-vits16-pretrain-lvd1689m
+
+  background_points: 1
+  near_background_points: 3
+  hard_negative_points: 3
+  min_background_distance: 0.08
+  near_background_min_distance: 0.06
+  near_background_max_distance: 0.18
+  hard_negative_min_confidence: 0.30
+  hard_negative_min_distance: 0.08
+  oriented_patch_size_input: 48.0
+  oriented_patch_output_size: 5
+  include_point_coordinates: false
+  include_valid_mask: true
+  valid_mask_luma_floor: 8.0
+  confidence_gate_mode: reward_only
+  confidence_reject_threshold: 0.0
+  confidence_penalty_threshold: 0.0
+  confidence_reward_threshold: 0.30
+  confidence_direct_accept_threshold: 0.60
+  confidence_reward_multiplier: 1.50
+
+  point_hidden_dim: 256
+
+  point_loss_weight: 1.0
+  score_mode: geometric_mean

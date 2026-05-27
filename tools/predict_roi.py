@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Sequence
+
+from PIL import Image
 
 import yaml
 
@@ -16,14 +17,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from yoloposevf.geometry import ImageSize
-from yoloposevf.postprocess import (
-    PosePrediction,
-    PostprocessConfig,
-    decide_action,
-    fuse_prediction,
-    load_postprocess_config,
-)
-from yoloposevf.preprocess import IMAGE_EXTENSIONS, crop_black_border_then_blackpad_image_file
+from yoloposevf.postprocess import PosePrediction, PostprocessConfig, decide_action, fuse_prediction, load_postprocess_config
+from yoloposevf.preprocess import IMAGE_EXTENSIONS, blackpad_image_file
+from yoloposevf.screen_photo_crop import classify_screen_photo, crop_screen_photo_window
 
 
 ALGORITHM_VERSION = "V1.2"
@@ -32,11 +28,12 @@ ALGORITHM_VERSION = "V1.2"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run YOLO-Pose inference and anatomy-constrained ROI postprocessing.")
     parser.add_argument("--weights", type=Path, required=True)
-    parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--source", type=Path, help="Image file or directory. Not required when --manifest is used.")
+    parser.add_argument("--manifest", type=Path, help="JSONL manifest with image paths in original_source/source_key/source.")
     parser.add_argument("--postprocess-config", type=Path, default=Path("configs/postprocess.yaml"))
     parser.add_argument("--out", type=Path, default=Path("Results/predictions/predictions.jsonl"))
     parser.add_argument("--conf", type=float, default=0.25)
-    parser.add_argument("--device", type=str)
+    parser.add_argument("--device", type=str, default="0", help="Inference device. Defaults to GPU 0; use cpu to force CPU.")
     parser.add_argument("--imgsz", type=int, help="Inference image size. Use the training size for best keypoint precision.")
     parser.add_argument("--tta", action="store_true", help="Use rotation/scale test-time augmentation without flips.")
     parser.add_argument("--tta-degrees", default="-6,0,6", help="Comma-separated rotation degrees for --tta.")
@@ -44,7 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--blackpad-fraction", type=float, default=0.30)
     parser.add_argument("--blackpad-min-padding", type=int, default=80)
     parser.add_argument("--blackpad-input-dir", type=Path, help="Directory for generated black-padded inference inputs.")
-    parser.add_argument("--cropped-input-dir", type=Path, help="Directory for generated no-existing-black-border inputs.")
+    parser.add_argument("--cropped-input-dir", type=Path, help="Directory for generated cropped/no-black DINO inputs.")
+    parser.add_argument("--precrop-input-dir", type=Path, help="Directory for screen-photo pre-cropped intermediate images.")
     parser.add_argument("--black-border-luma-floor", type=float, default=8.0)
     return parser.parse_args()
 
@@ -65,6 +63,39 @@ def iter_images(source: Path) -> list[Path]:
     return sorted(path for path in source.rglob("*") if path.suffix.lower() in IMAGE_EXTENSIONS)
 
 
+def read_manifest_records(path: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        records.append(json.loads(line))
+    return records
+
+
+def manifest_image_path(record: dict[str, Any]) -> Path:
+    for field in ("original_source", "source_key", "source"):
+        value = record.get(field)
+        if value:
+            return Path(str(value))
+    raise ValueError("manifest record has no original_source/source_key/source path")
+
+
+def unique_manifest_relative_path(record: dict[str, Any], image_path: Path, index: int, used: set[Path]) -> Path:
+    class_name = str(record.get("class_name") or "manifest")
+    candidate = Path(class_name) / image_path.name
+    if candidate not in used:
+        used.add(candidate)
+        return candidate
+    stem = image_path.stem
+    suffix = image_path.suffix
+    for counter in range(1, 10000):
+        candidate = Path(class_name) / f"{stem}_{index:05d}_{counter}{suffix}"
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+    raise RuntimeError(f"could not make unique manifest path for {image_path}")
+
+
 def default_blackpad_input_dir(out_path: Path) -> Path:
     return out_path.parent / f"{out_path.stem}_blackpad_inputs"
 
@@ -73,46 +104,134 @@ def default_cropped_input_dir(out_path: Path) -> Path:
     return out_path.parent / f"{out_path.stem}_cropped_inputs"
 
 
+def default_precrop_input_dir(out_path: Path) -> Path:
+    return out_path.parent / f"{out_path.stem}_precrop_inputs"
+
+
 def relative_image_path(image_path: Path, source: Path) -> Path:
     if source.is_file():
         return Path(image_path.name)
     return image_path.relative_to(source)
 
 
-def prepare_inference_images(
-    source: Path,
+def _build_pre_crop_info(
     *,
+    triggered: bool,
+    mode: str,
+    reason: list[str] | None,
+    box_xyxy: tuple[int, int, int, int] | None,
+    signals: dict[str, Any] | None,
+    original_width: int,
+    original_height: int,
+    cropped_width: int | None,
+    cropped_height: int | None,
+) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "triggered": triggered,
+        "mode": mode,
+        "reason": reason,
+        "box_xyxy": list(box_xyxy) if box_xyxy is not None else None,
+        "signals": signals,
+        "original_width": original_width,
+        "original_height": original_height,
+        "cropped_width": cropped_width,
+        "cropped_height": cropped_height,
+    }
+    return info
+
+
+def prepare_inference_images(
+    source: Path | None,
+    *,
+    manifest: Path | None,
     out_path: Path,
     blackpad_input_dir: Path | None,
     cropped_input_dir: Path | None,
-    blackpad_fraction: float,
-    blackpad_min_padding: int,
-    black_border_luma_floor: float,
+    precrop_input_dir: Path | None = None,
+    blackpad_fraction: float = 0.30,
+    blackpad_min_padding: int = 80,
+    black_border_luma_floor: float = 8.0,
 ) -> tuple[list[Path], dict[str, dict[str, Any]]]:
-    images = iter_images(source)
+    manifest_records = read_manifest_records(manifest) if manifest is not None else []
+    if manifest_records:
+        image_rows = [(manifest_image_path(record), record) for record in manifest_records]
+    else:
+        if source is None:
+            raise ValueError("--source is required when --manifest is not provided")
+        image_rows = [(image_path, {}) for image_path in iter_images(source)]
     metadata: dict[str, dict[str, Any]] = {}
-
     pad_root = (blackpad_input_dir or default_blackpad_input_dir(out_path)).resolve()
     crop_root = (cropped_input_dir or default_cropped_input_dir(out_path)).resolve()
+    precrop_root = (precrop_input_dir or default_precrop_input_dir(out_path)).resolve()
     model_input_images: list[Path] = []
-    for image_path in images:
-        rel = relative_image_path(image_path, source)
-        destination = pad_root / rel
+    used_rel_paths: set[Path] = set()
+    for index, (image_path, record) in enumerate(image_rows):
+        if manifest_records:
+            rel = unique_manifest_relative_path(record, image_path, index, used_rel_paths)
+        else:
+            assert source is not None
+            rel = relative_image_path(image_path, source)
+
+        # Step 0: Screen-photo pre-crop classification and optional cropping.
+        with Image.open(image_path) as img:
+            img = img.convert("RGB")
+            triggered, signals = classify_screen_photo(img)
+            if triggered:
+                pre_cropped, pre_crop_box = crop_screen_photo_window(img)
+                precrop_dest = precrop_root / rel
+                precrop_dest.parent.mkdir(parents=True, exist_ok=True)
+                pre_cropped.save(precrop_dest, quality=95, subsampling=0)
+                working_source = precrop_dest
+                pre_crop_info = _build_pre_crop_info(
+                    triggered=True,
+                    mode="screen_photo_precrop",
+                    reason=signals.get("reason", []),
+                    box_xyxy=pre_crop_box,
+                    signals={k: v for k, v in signals.items() if k != "reason"},
+                    original_width=img.width,
+                    original_height=img.height,
+                    cropped_width=pre_cropped.width,
+                    cropped_height=pre_cropped.height,
+                )
+            else:
+                working_source = image_path
+                pre_crop_info = _build_pre_crop_info(
+                    triggered=False,
+                    mode="none",
+                    reason=signals.get("reason", ["none"]),
+                    box_xyxy=None,
+                    signals={k: v for k, v in signals.items() if k != "reason"},
+                    original_width=img.width,
+                    original_height=img.height,
+                    cropped_width=None,
+                    cropped_height=None,
+                )
+
+        # Step 1: Black-border crop + blackpad (existing V1.2 pipeline).
         cropped_destination = crop_root / rel
-        info = crop_black_border_then_blackpad_image_file(
-            image_path,
+        destination = pad_root / rel
+        info = blackpad_image_file(
+            working_source,
             destination,
-            cropped_destination=cropped_destination,
             fraction=blackpad_fraction,
             min_padding=blackpad_min_padding,
-            black_luma_floor=black_border_luma_floor,
+            black_border_luma_floor=black_border_luma_floor,
+            cropped_destination=cropped_destination,
         )
         model_input_images.append(destination)
+        cropped_source = str(cropped_destination.resolve())
+        preprocess_info = info.to_dict()
+        preprocess_info["pre_crop"] = pre_crop_info
         metadata[str(destination.resolve())] = {
             "source": str(destination.resolve()),
             "original_source": str(image_path.resolve()),
-            "cropped_source": str(cropped_destination.resolve()),
-            "preprocess": info.to_dict(),
+            "dinov3_source": cropped_source,
+            "cropped_source": cropped_source,
+            "preprocess": preprocess_info,
+            "pre_crop": pre_crop_info,
+            "manifest_index": index,
+            "class_name": record.get("class_name"),
+            "source_key": record.get("source_key"),
         }
     return model_input_images, metadata
 
@@ -240,7 +359,6 @@ def polygon_dark_fraction(
     mode: str = "absolute",
     relative_luma_ratio: float = 0.80,
     foreground_luma_floor: float = 8.0,
-    analysis_bbox: Sequence[float] | None = None,
 ) -> tuple[float | None, float | None, float | None]:
     try:
         import numpy as np
@@ -255,25 +373,11 @@ def polygon_dark_fraction(
     points = [(float(point[0]), float(point[1])) for point in polygon]
     ImageDraw.Draw(mask).polygon(points, fill=1)
     image_array = np.asarray(image)
-    mask_array = np.asarray(mask, dtype=bool).copy()
-    threshold_array = image_array
-    if analysis_bbox is not None:
-        image_height, image_width = mask_array.shape
-        x1, y1, x2, y2 = [float(value) for value in analysis_bbox]
-        left = max(0, min(image_width, int(math.floor(min(x1, x2)))))
-        top = max(0, min(image_height, int(math.floor(min(y1, y2)))))
-        right = max(0, min(image_width, int(math.ceil(max(x1, x2)))))
-        bottom = max(0, min(image_height, int(math.ceil(max(y1, y2)))))
-        if left >= right or top >= bottom:
-            return 0.0, None, None
-        valid_region = np.zeros_like(mask_array, dtype=bool)
-        valid_region[top:bottom, left:right] = True
-        mask_array &= valid_region
-        threshold_array = image_array[top:bottom, left:right]
+    mask_array = np.asarray(mask, dtype=bool)
     if not mask_array.any():
         return 0.0, None, None
     effective_threshold, reference_luma = _relative_dark_threshold(
-        threshold_array,
+        image_array,
         mode=mode,
         absolute_threshold=luma_threshold,
         relative_ratio=relative_luma_ratio,
@@ -308,30 +412,22 @@ def effective_area_from_metadata(
     metadata: dict[str, Any],
     cfg: PostprocessConfig,
 ) -> tuple[float | None, tuple[float, float, float, float] | None, str]:
-    preprocess = metadata.get("preprocess") if isinstance(metadata.get("preprocess"), dict) else {}
-    preprocess_type = str(preprocess.get("type", ""))
-    no_black_bbox = preprocess.get("no_black_bbox_in_model_input")
-    if isinstance(no_black_bbox, (list, tuple)) and len(no_black_bbox) == 4:
-        x1, y1, x2, y2 = [float(value) for value in no_black_bbox]
-        area = max(x2 - x1, 0.0) * max(y2 - y1, 0.0)
-        if area > 0.0:
-            return area, (x1, y1, x2, y2), "preprocess_no_black_bbox"
-
-    if preprocess_type in {"crop_black_border_then_blackpad", "crop_black_border", "blackpad"}:
-        padding = float(preprocess.get("padding_px", 0.0) or 0.0)
-        if preprocess_type in {"crop_black_border_then_blackpad", "crop_black_border"}:
-            width = float(preprocess.get("cropped_width", 0.0) or 0.0)
-            height = float(preprocess.get("cropped_height", 0.0) or 0.0)
-            mode = "preprocess_cropped_region"
-        else:
-            width = float(preprocess.get("original_width", 0.0) or 0.0)
-            height = float(preprocess.get("original_height", 0.0) or 0.0)
-            mode = "preprocess_original_region"
-        if width > 0.0 and height > 0.0:
-            bbox = (padding, padding, padding + width, padding + height)
-            return width * height, bbox, mode
-
     foreground_floor = float(cfg.roi_dark_foreground_luma_floor)
+    preprocess = metadata.get("preprocess") or {}
+    preprocess_type = str(preprocess.get("type", "")).lower()
+    if preprocess_type in {"crop_black_border_then_blackpad", "crop_black_borders_then_blackpad", "crop_black_border"}:
+        no_black_bbox = preprocess.get("no_black_bbox_in_model_input")
+        cropped_width = float(preprocess.get("no_black_width") or preprocess.get("cropped_width") or 0.0)
+        cropped_height = float(preprocess.get("no_black_height") or preprocess.get("cropped_height") or 0.0)
+        if no_black_bbox and len(no_black_bbox) == 4:
+            bbox = tuple(float(value) for value in no_black_bbox)
+            x1, y1, x2, y2 = bbox
+            area = max(x2 - x1, 0.0) * max(y2 - y1, 0.0)
+            return (area if area > 0.0 else None), bbox, "preprocess_no_black_content"
+        padding = float(preprocess.get("padding_px") or 0.0)
+        if cropped_width > 0.0 and cropped_height > 0.0:
+            bbox = (padding, padding, padding + cropped_width, padding + cropped_height)
+            return cropped_width * cropped_height, bbox, "preprocess_no_black_content"
     source = Path(str(metadata.get("source") or ""))
     bbox = foreground_bbox(source, foreground_luma_floor=foreground_floor)
     if bbox is None:
@@ -374,7 +470,6 @@ def apply_image_quality_gates(record: dict[str, Any], image_path: Path, cfg: Pos
             mode=dark_mode,
             relative_luma_ratio=cfg.roi_dark_relative_luma_ratio,
             foreground_luma_floor=cfg.roi_dark_foreground_luma_floor,
-            analysis_bbox=record.get("effective_image_bbox"),
         )
         if polygon
         else (None, None, None)
@@ -472,16 +567,32 @@ def predict_with_tta(
 
 def metadata_for_source(metadata: dict[str, dict[str, Any]], source: str | Path) -> dict[str, Any]:
     path = Path(str(source))
-    return metadata.get(str(path.resolve()), {"source": str(source), "original_source": str(source), "preprocess": {"type": "none"}})
+    return metadata.get(
+        str(path.resolve()),
+        {
+            "source": str(source),
+            "original_source": str(source),
+            "dinov3_source": str(source),
+            "cropped_source": str(source),
+            "preprocess": {"type": "none"},
+        },
+    )
 
 
 def attach_prediction_metadata(record: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
     record["algorithm_version"] = ALGORITHM_VERSION
     record["source"] = metadata["source"]
     record["original_source"] = metadata["original_source"]
-    if "cropped_source" in metadata:
+    if metadata.get("dinov3_source") is not None:
+        record["dinov3_source"] = metadata["dinov3_source"]
+    if metadata.get("cropped_source") is not None:
         record["cropped_source"] = metadata["cropped_source"]
     record["preprocess"] = metadata["preprocess"]
+    if metadata.get("pre_crop") is not None:
+        record["pre_crop"] = metadata["pre_crop"]
+    for field in ("manifest_index", "class_name", "source_key"):
+        if metadata.get(field) is not None:
+            record[field] = metadata[field]
     return record
 
 
@@ -496,9 +607,11 @@ def main() -> None:
     model = YOLO(str(args.weights))
     images, source_metadata = prepare_inference_images(
         args.source,
+        manifest=args.manifest,
         out_path=args.out,
         blackpad_input_dir=args.blackpad_input_dir,
         cropped_input_dir=args.cropped_input_dir,
+        precrop_input_dir=args.precrop_input_dir,
         blackpad_fraction=args.blackpad_fraction,
         blackpad_min_padding=args.blackpad_min_padding,
         black_border_luma_floor=args.black_border_luma_floor,
