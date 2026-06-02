@@ -169,6 +169,75 @@ def test_resolve_dinov3_input_can_remove_padding_from_source(tmp_path) -> None:
     assert resolved.keypoints[0] == [5.0, 10.0, 0.9]
 
 
+def test_resolve_dinov3_input_can_rebuild_crop_from_original_source(tmp_path) -> None:
+    original = tmp_path / "original.png"
+    image = Image.new("RGB", (80, 60), color=(0, 0, 0))
+    for y in range(8, 48):
+        for x in range(12, 62):
+            image.putpixel((x, y), (180, 120, 90))
+    image.save(original)
+    record = {
+        "source": "memory://model_input/0/original.png",
+        "original_source": str(original),
+        "preprocess": {
+            "type": "crop_black_border_then_blackpad",
+            "padding_px": 10,
+            "crop_bbox_xyxy": [12, 8, 62, 48],
+            "cropped_width": 50,
+            "cropped_height": 40,
+            "no_black_width": 50,
+            "no_black_height": 40,
+        },
+        "keypoints": [[15, 18, 0.9], [30, 35, 0.8], [50, 35, 0.7]],
+    }
+
+    resolved = resolve_dinov3_prediction_input(record)
+
+    assert resolved is not None
+    assert resolved.image_source_field == "original_source_crop_bbox"
+    assert resolved.image.size == (50, 40)
+    assert resolved.keypoints[0] == [5.0, 8.0, 0.9]
+
+
+def test_resolve_dinov3_input_replays_screen_precrop_before_crop_bbox(tmp_path) -> None:
+    original = tmp_path / "screen_photo.png"
+    image = Image.new("RGB", (100, 80), color=(20, 20, 20))
+    for y in range(10, 70):
+        for x in range(20, 80):
+            image.putpixel((x, y), (160, 100, 70))
+    for y in range(18, 48):
+        for x in range(25, 65):
+            image.putpixel((x, y), (210, 130, 90))
+    image.save(original)
+    record = {
+        "source": "memory://model_input/0/screen_photo.png",
+        "original_source": str(original),
+        "pre_crop": {
+            "triggered": True,
+            "mode": "screen_photo_precrop",
+            "box_xyxy": [20, 10, 80, 70],
+        },
+        "preprocess": {
+            "type": "crop_black_border_then_blackpad",
+            "padding_px": 10,
+            "crop_bbox_xyxy": [5, 8, 45, 38],
+            "cropped_width": 40,
+            "cropped_height": 30,
+            "no_black_width": 40,
+            "no_black_height": 30,
+        },
+        "keypoints": [[15, 18, 0.9], [25, 28, 0.8], [35, 28, 0.7]],
+    }
+
+    resolved = resolve_dinov3_prediction_input(record)
+
+    assert resolved is not None
+    assert resolved.image_source_field == "original_source_pre_crop_crop_bbox"
+    assert resolved.image.size == (40, 30)
+    assert resolved.image.getpixel((0, 0)) == (210, 130, 90)
+    assert resolved.keypoints[0] == [5.0, 8.0, 0.9]
+
+
 def test_reward_only_gate_has_no_hard_reject_when_threshold_is_disabled() -> None:
     scores = torch.tensor([0.00, 0.04, 0.29, 0.30, 0.45, 0.60])
     factors, direct_accept, hard_reject = dinov3_confidence_gate(

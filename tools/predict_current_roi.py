@@ -41,6 +41,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tta-degrees", default="-6,0,6")
     parser.add_argument("--tta-scales", default="0.95,1.0,1.05")
     parser.add_argument(
+        "--save-intermediates",
+        action="store_true",
+        help="Persist YOLO pre-crop/no-black/blackpad intermediate images. Defaults to metadata-only in-memory preprocessing.",
+    )
+    parser.add_argument(
         "--no-apply-confidence-gate",
         action="store_true",
         help="Attach DINOv3 scores without changing final_confidence/action.",
@@ -100,11 +105,12 @@ def main() -> None:
         str(args.blackpad_min_padding),
         "--black-border-luma-floor",
         str(args.black_border_luma_floor),
-        "--save-intermediates",
     ]
     append_optional_path(predict_cmd, "--source", args.source)
     append_optional_path(predict_cmd, "--manifest", args.manifest)
     append_optional_value(predict_cmd, "--imgsz", args.imgsz)
+    if args.save_intermediates:
+        predict_cmd.append("--save-intermediates")
     if args.tta:
         predict_cmd.extend(["--tta", "--tta-degrees", args.tta_degrees, "--tta-scales", args.tta_scales])
 

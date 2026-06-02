@@ -127,6 +127,62 @@ def preprocess_crop_bbox(record: dict[str, Any]) -> tuple[int, int, int, int] | 
     return None
 
 
+def record_pre_crop_bbox(record: dict[str, Any]) -> tuple[int, int, int, int] | None:
+    pre_crop = record.get("pre_crop") or (record.get("preprocess") or {}).get("pre_crop") or {}
+    if not pre_crop.get("triggered"):
+        return None
+    bbox = pre_crop.get("box_xyxy")
+    if bbox and len(bbox) == 4:
+        return tuple(int(round(float(value))) for value in bbox)
+    return None
+
+
+def valid_crop_bbox(image: Image.Image, bbox: tuple[int, int, int, int]) -> bool:
+    left, top, right, bottom = bbox
+    return left >= 0 and top >= 0 and right > left and bottom > top and right <= image.width and bottom <= image.height
+
+
+def reconstructed_cropped_original(record: dict[str, Any], original_path: Path) -> DinoV3PredictionInput | None:
+    crop_bbox = preprocess_crop_bbox(record)
+    if crop_bbox is None:
+        return None
+    keypoints = prediction_keypoints(record)
+    if keypoints is None:
+        return None
+    padding_px = preprocess_padding_px(record)
+    cropped_keypoints = keypoints_yolo_padded_to_cropped(keypoints, padding_px=padding_px)
+    expected_size = expected_cropped_size(record)
+
+    image = Image.open(original_path).convert("RGB")
+    source_steps = ["original_source"]
+    pre_crop_bbox = record_pre_crop_bbox(record)
+    if pre_crop_bbox is not None:
+        if not valid_crop_bbox(image, pre_crop_bbox):
+            return None
+        image = image.crop(pre_crop_bbox)
+        source_steps.append("pre_crop")
+    if not valid_crop_bbox(image, crop_bbox):
+        return None
+    image = image.crop(crop_bbox)
+    source_steps.append("crop_bbox")
+
+    warnings: list[str] = []
+    _append_consistency_warnings(
+        warnings,
+        image_size=image.size,
+        keypoints=cropped_keypoints,
+        expected_size=expected_size,
+    )
+    return DinoV3PredictionInput(
+        image=image,
+        keypoints=cropped_keypoints,
+        image_source=f"{original_path}#{'+'.join(source_steps[1:])}",
+        image_source_field="_".join(source_steps),
+        padding_px=padding_px,
+        warnings=warnings,
+    )
+
+
 def expected_cropped_size(record: dict[str, Any]) -> tuple[int, int] | None:
     preprocess = record.get("preprocess") or {}
     width = int(round(float(preprocess.get("no_black_width") or preprocess.get("cropped_width") or 0)))
@@ -229,22 +285,9 @@ def resolve_dinov3_prediction_input(record: dict[str, Any]) -> DinoV3PredictionI
     original_path = Path(str(original_value)) if original_value else None
     crop_bbox = preprocess_crop_bbox(record)
     if original_path is not None and original_path.exists() and crop_bbox is not None:
-        image = Image.open(original_path).convert("RGB").crop(crop_bbox)
-        warnings = []
-        _append_consistency_warnings(
-            warnings,
-            image_size=image.size,
-            keypoints=cropped_keypoints,
-            expected_size=expected_size,
-        )
-        return DinoV3PredictionInput(
-            image=image,
-            keypoints=cropped_keypoints,
-            image_source=f"{original_path}#crop_bbox",
-            image_source_field="original_source_crop_bbox",
-            padding_px=padding_px,
-            warnings=warnings,
-        )
+        reconstructed = reconstructed_cropped_original(record, original_path)
+        if reconstructed is not None:
+            return reconstructed
 
     if original_path is not None and original_path.exists() and padding_px > 0.0:
         image = Image.open(original_path).convert("RGB")

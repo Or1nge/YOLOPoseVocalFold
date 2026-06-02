@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Changed `tools/predict_current_roi.py` so the current YOLO-Pose + DINOv3
+  inference path no longer saves pre-crop/no-black/blackpad intermediate images
+  by default. `--save-intermediates` is now explicit on the wrapper, and DINOv3
+  scoring can reconstruct the no-black image from `original_source`, `pre_crop`,
+  and `preprocess.crop_bbox_xyxy` metadata when those files are not present.
 - Changed the active DINOv3 point-region confidence gate so
   `point_region_score < 0.10` is treated as `hard_reject`; legacy reward-only
   checkpoints with `confidence_reject_threshold: 0.0` are upgraded to the new
