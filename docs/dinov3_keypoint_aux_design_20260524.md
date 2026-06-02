@@ -79,10 +79,12 @@ To let the auxiliary score modify `final_confidence`, add
 `--apply-confidence-gate`. The default is score-only so the first run can be
 audited without changing existing ROI decisions.
 
-The active gate only uses DINOv3 as positive evidence:
+The active gate rejects only extremely low DINOv3 point-region scores and
+otherwise uses DINOv3 as positive evidence:
 
 ```text
-point_region_score < 0.30: confidence_factor = 1.0
+point_region_score < 0.10: hard reject
+0.10 <= point_region_score < 0.30: confidence_factor = 1.0
 0.30 <= point_region_score < 0.60: confidence_factor rises linearly from 1.0 to 1.5
 point_region_score >= 0.60: direct auto-accept candidate
 ```

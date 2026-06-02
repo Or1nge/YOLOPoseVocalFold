@@ -90,6 +90,11 @@ def load_aux_config_from_checkpoint(checkpoint: dict[str, Any]) -> DinoV3AuxConf
     else:
         for key in gate_keys:
             dinov3.setdefault(key, getattr(defaults, key))
+    if (
+        str(dinov3.get("confidence_gate_mode", defaults.confidence_gate_mode)).lower() == "reward_only"
+        and float(dinov3.get("confidence_reject_threshold") or 0.0) <= 0.0
+    ):
+        dinov3["confidence_reject_threshold"] = defaults.confidence_reject_threshold
     return DinoV3AuxConfig(**dinov3)
 
 

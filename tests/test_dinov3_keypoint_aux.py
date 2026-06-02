@@ -5,7 +5,11 @@ from types import SimpleNamespace
 import torch
 from PIL import Image
 
-from tools.score_predictions_with_dinov3_aux import maybe_apply_gate, resolve_dinov3_prediction_input
+from tools.score_predictions_with_dinov3_aux import (
+    load_aux_config_from_checkpoint,
+    maybe_apply_gate,
+    resolve_dinov3_prediction_input,
+)
 
 from yoloposevf.dinov3_aux import (
     DinoV3KeypointAuxHead,
@@ -178,6 +182,37 @@ def test_reward_only_gate_has_no_hard_reject_when_threshold_is_disabled() -> Non
     assert torch.allclose(factors, torch.tensor([1.0, 1.0, 1.0, 1.0, 1.25, 1.5]))
     assert direct_accept.tolist() == [False, False, False, False, False, True]
     assert hard_reject.tolist() == [False, False, False, False, False, False]
+
+
+def test_reward_only_gate_hard_rejects_below_point_one() -> None:
+    scores = torch.tensor([0.00, 0.09, 0.10, 0.29, 0.30, 0.60])
+    factors, direct_accept, hard_reject = dinov3_confidence_gate(
+        scores,
+        gate_mode="reward_only",
+        reject_threshold=0.10,
+        reward_threshold=0.30,
+        direct_accept_threshold=0.60,
+        reward_multiplier=1.50,
+    )
+    assert torch.allclose(factors, torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 1.5]))
+    assert direct_accept.tolist() == [False, False, False, False, False, True]
+    assert hard_reject.tolist() == [True, True, False, False, False, False]
+
+
+def test_checkpoint_loader_upgrades_legacy_no_reject_reward_gate() -> None:
+    checkpoint = {
+        "config": {
+            "dinov3": {
+                "backend": "timm",
+                "confidence_gate_mode": "reward_only",
+                "confidence_reject_threshold": 0.0,
+            }
+        }
+    }
+
+    cfg = load_aux_config_from_checkpoint(checkpoint)
+
+    assert cfg.confidence_reject_threshold == 0.10
 
 
 def test_gate_rejects_keypoints_outside_cropped_image_warning() -> None:

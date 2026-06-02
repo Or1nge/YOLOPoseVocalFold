@@ -39,7 +39,7 @@ class DinoV3AuxConfig:
     valid_mask_luma_floor: float = 8.0
     crop_black_border_luma_floor: float = 8.0
     confidence_gate_mode: str = "reward_only"
-    confidence_reject_threshold: float = 0.0
+    confidence_reject_threshold: float = 0.10
     confidence_penalty_threshold: float = 0.0
     confidence_reward_threshold: float = 0.30
     confidence_direct_accept_threshold: float = 0.60

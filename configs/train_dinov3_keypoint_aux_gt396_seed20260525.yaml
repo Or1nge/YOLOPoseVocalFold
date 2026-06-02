@@ -36,7 +36,7 @@ dinov3:
   include_valid_mask: true
   valid_mask_luma_floor: 8.0
   confidence_gate_mode: reward_only
-  confidence_reject_threshold: 0.0
+  confidence_reject_threshold: 0.10
   confidence_penalty_threshold: 0.0
   confidence_reward_threshold: 0.30
   confidence_direct_accept_threshold: 0.60

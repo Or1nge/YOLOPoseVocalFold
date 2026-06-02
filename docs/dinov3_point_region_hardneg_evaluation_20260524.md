@@ -110,6 +110,6 @@ Evaluation outputs:
 | Hard-floor linear-reward DINO gate, 0.05/0.30/0.60 | 12/20 | 8/20 | 527/800 | 28/800 | 69.375% | 0/100 |
 | Reward-only linear DINO gate, 0.30/0.60 | 13/20 | 7/20 | 547/800 | 38/800 | 73.125% | 1/100 |
 
-After correcting the source-folder label for `0006731802.jpg`, the mixed false positive in the reward-only linear run is treated as a dataset-folder issue rather than a DINO gate failure; the hard floor is disabled in the active config.
+After correcting the source-folder label for `0006731802.jpg`, the mixed false positive in the reward-only linear run is treated as a dataset-folder issue rather than a DINO gate failure. The active config now restores a stricter hard floor: `score < 0.10` is rejected, while `0.10-0.30` remains unchanged and higher scores keep the linear reward behavior.
 
 Recommendation: keep the checkpoint and code as an auxiliary diagnostic experiment, but do not promote it into the current ROI pipeline.

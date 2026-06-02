@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Changed the active DINOv3 point-region confidence gate so
+  `point_region_score < 0.10` is treated as `hard_reject`; legacy reward-only
+  checkpoints with `confidence_reject_threshold: 0.0` are upgraded to the new
+  floor at scoring time.
 - Changed downstream ROI crop export so fallback/retained images default to
   `preprocessed_source`: use the saved no-black/cropped image
   (`cropped_source`/`dinov3_source`) when available, then fall back to
@@ -46,7 +50,7 @@
 - Updated DINOv3 auxiliary scoring to read no-black/cropped images before padded `source`, transform YOLO padded keypoints back into cropped coordinates, and keep the auxiliary score available for final confidence/action gating.
 - Changed DINOv3 valid-mask sampling so out-of-image oriented patch locations are not clamped to edge pixels; incomplete 48x48 point patches now carry invalid mask cells and zeroed features.
 - Started `exp/dinov3-keypoint-aux` as a replacement direction for keypoint-local contrast.
-- Narrowed the frozen-DINOv3 auxiliary scorer to oriented point-region `background/A/L/R` classification with mined hard negatives and a reward-only confidence gate: `0.30-0.60` linearly rewards up to `1.5x`, very high scores can directly pass, and low DINO scores no longer directly reject.
+- Narrowed the frozen-DINOv3 auxiliary scorer to oriented point-region `background/A/L/R` classification with mined hard negatives and a configurable confidence gate.
 - Added valid-mask support to DINOv3 oriented point-region patches so invalid local cells are zeroed and exposed to the point head as a mask channel.
 - Added training and prediction-scoring entrypoints: `tools/train_dinov3_keypoint_aux.py` and `tools/score_predictions_with_dinov3_aux.py`.
 - Added DINOv3 auxiliary configs, design notes, and unit tests.

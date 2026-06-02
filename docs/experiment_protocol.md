@@ -105,7 +105,7 @@ python tools/train_dinov3_keypoint_aux.py --config configs/train_dinov3_keypoint
 pytest tests/test_dinov3_keypoint_aux.py
 ```
 
-默认打分入口只追加 `dinov3_aux` 字段，不改变已有 `final_confidence/action`。只有显式加 `--apply-confidence-gate` 时，才把 DINOv3 auxiliary factor 应用到 `final_confidence/action`。当前 gate：低于 `0.30` 不动，`0.30-0.60` 按比例从 `1.0x` 奖励到 `1.5x`，`>=0.60` 作为 DINO 极高分直接通过候选；DINO 低分不再直接拒绝。
+默认打分入口只追加 `dinov3_aux` 字段，不改变已有 `final_confidence/action`。只有显式加 `--apply-confidence-gate` 时，才把 DINOv3 auxiliary factor 应用到 `final_confidence/action`。当前 gate：低于 `0.10` 标为拒绝，`0.10-0.30` 不动，`0.30-0.60` 按比例从 `1.0x` 奖励到 `1.5x`，`>=0.60` 作为 DINO 极高分直接通过候选。
 
 ### 历史 LDP pseudo 两阶段数据设计
 
