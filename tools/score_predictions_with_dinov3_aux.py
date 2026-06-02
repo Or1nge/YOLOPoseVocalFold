@@ -396,6 +396,15 @@ def maybe_apply_gate(
     if not aux:
         return record
     old_conf = float(record.get("final_confidence", 0.0))
+    warnings = set(aux.get("warnings") or [])
+    if "dinov3_keypoints_outside_cropped_image" in warnings:
+        record["pre_dinov3_aux_confidence"] = old_conf
+        record["final_confidence"] = 0.0
+        record["action"] = "reject_or_relabel"
+        record["dinov3_aux_gate_action"] = "reject_keypoints_outside_cropped_image"
+        record["usable_bbox"] = None
+        record["usable_box_polygon"] = None
+        return record
     factor = float(aux.get("confidence_factor", 1.0))
     direct_accept = bool(aux.get("direct_accept", False))
     hard_reject = bool(aux.get("hard_reject", False))

@@ -6,7 +6,7 @@ main 现在包含标准 YOLO-Pose 训练、推理后处理、keypoint-containmen
 
 1. LabelMe 转 YOLO-Pose 标签。
 2. 标准 YOLO-Pose 训练。
-3. 预测前先裁掉原图已有近纯黑边，得到矩形有效图像；再加统一宽度黑边后交给 YOLO-Pose，blackpad 是必需输入步骤。
+3. 预测前先检测并裁掉外沿大面积近黑边框/背景及其连通的灰白角落或 UI 区域，再裁掉残余近纯黑边，得到矩形有效图像；随后加统一宽度黑边后交给 YOLO-Pose，blackpad 是必需输入步骤。
 4. 推理得到 `bbox + 3 keypoints + confidence`。
 5. 以前联合为顶点，连接左右后方中点并取夹角角平分线。
 6. 沿角平分线反方向回退一小段到 A 点，以垂直于角平分线的线段为底，生成旋转 ROI。

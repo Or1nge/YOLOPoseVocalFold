@@ -271,44 +271,44 @@ python tools/score_predictions_with_dinov3_aux.py \
 
 ## 推理
 
-当前推荐 ROI 定位算法版本为 `V1.2`：使用 `vf_roi_v1` 权重，并在每张输入图像进入模型前先裁掉已有黑边，再对裁后的矩形有效图像自动增加四周统一黑边。
+当前项目主 ROI 模型为 `vf_roi_current`：先用当前 YOLO-Pose 权重生成三点/旋转 ROI，再用 DINOv3 point-region auxiliary head 对三点做语义打分并默认应用 confidence gate。这个别名当前指向 2026-05-25 refreshed-holdout 组合：`mixedneg120_blackpad` YOLO-Pose checkpoint + `gt396_seed20260525` DINOv3 auxiliary head。
 
 ```text
-Results/models/vf_roi_v1/best.pt
+Results/models/vf_roi_current/pose_best.pt
+Results/models/vf_roi_current/aux_best.pt
+Results/models/vf_roi_current/postprocess.yaml
 ```
 
 ```bash
-python tools/predict_roi.py \
-  --weights Results/models/vf_roi_v1/best.pt \
+python tools/predict_current_roi.py \
   --source data/yolo_pose/images/val \
-  --postprocess-config Results/models/vf_roi_v1/postprocess.yaml \
-  --out Results/predictions/val_predictions.jsonl
+  --out Results/predictions/val_predictions_dinov3.jsonl \
+  --batch 32 \
+  --preprocess-workers 8
 ```
 
-V1.2 的预测前处理会先按低亮度前景框裁掉已有黑边，再把裁后图按长边 30%、最少 80 px 加四周黑边；这个 black pad 是 YOLO-Pose 的必经输入步骤。黑边图写到
-`<out_stem>_blackpad_inputs/`，裁后 no-black 图写到 `<out_stem>_cropped_inputs/`，预测坐标基于黑边图。JSONL 中 `source` 指向黑边图，`dinov3_source`/`cropped_source` 指向裁后图，
-`original_source` 保留原图路径，`preprocess.type` 固定为 `crop_black_border_then_blackpad`，并记录原图尺寸、`crop_bbox_xyxy`、是否实际裁剪、裁后尺寸、`padding_px`、padding 规则、`model_input_width/height` 和 `no_black_bbox_in_model_input`。DINO 后续只使用 `dinov3_source`/`cropped_source` 对应的 no-black 图，按 `padding_px` 把 YOLO keypoints 转回 cropped 坐标。
+`tools/predict_current_roi.py` 会保留一份中间 YOLO-Pose JSONL（默认 `<out_stem>_pose_raw.jsonl`），再调用 `tools/score_predictions_with_dinov3_aux.py --apply-confidence-gate` 写出最终 DINO-gated JSONL。该入口默认启用 `--save-intermediates`，确保 DINO scorer 使用预裁剪/去黑边后的 `cropped_source`，尤其适合手机翻拍屏幕图。
 
-从 V1.2 开始，`tools/predict_roi.py` 还会在 black-border crop + blackpad 之前自动检测并对手机翻拍屏幕图片做预裁剪（screen-photo pre-crop）。检测逻辑通过固定色条纹（stripe_col/stripe_row > 0.24）和蓝色区域（blue_col/blue_row > 0.06）判断是否为翻拍图；若触发则先裁出喉镜窗口区域（tissue bbox → window frame → trim UI edges），再把裁后图送进黑边裁剪和加黑边流程。预裁剪中间图写到 `<out_stem>_precrop_inputs/`。每条 JSONL 输出的 `pre_crop` 字段记录触发状态（`triggered`）、模式（`mode`）、触发原因（`reason`）、裁剪框（`box_xyxy`）、信号值（`signals`）、原始尺寸和预裁后尺寸；同一份信息也写入 `preprocess.pre_crop`，方便连同 V1.2 前处理一起审查。未触发的图片 `pre_crop.triggered` 为 `false`、`mode` 为 `"none"`。`original_source` 始终指向最原始图像（翻拍前），`source`/`dinov3_source`/`cropped_source` 的语义不变。
+V1.2 的预测前处理会先检测外沿是否存在大面积近黑色干扰区。若触发，会从图像边缘连通区域中同时移除近黑色边框/背景和灰白色角落/UI 区域，再按低亮度前景框裁掉残余黑边，最后把裁后图按长边 30%、最少 80 px 加四周黑边；这个 black pad 是 YOLO-Pose 的必经输入步骤。默认情况下，这些 pre-crop/no-black/blackpad 中间图只在内存中生成并直接送入 YOLO，避免大量磁盘写图。JSONL 中 `source` 为 `memory://...` 引用，`original_source` 保留原图路径，`preprocess.type` 固定为 `crop_black_border_then_blackpad`，并记录原图尺寸、最终 `crop_bbox_xyxy`、是否实际裁剪、裁后尺寸、`padding_px`、padding 规则、`model_input_width/height`、`no_black_bbox_in_model_input`，以及 `edge_artifact_crop_*` 外沿黑边检测诊断字段。没有大面积外沿黑边的图会跳过该步，只保留原来的低亮度去黑边行为。如果后续要审查中间图或给 DINOv3 scorer 使用裁后图，可加 `--save-intermediates`；这时黑边图写到 `<out_stem>_blackpad_inputs/`，裁后 no-black 图写到 `<out_stem>_cropped_inputs/`，预裁切图写到 `<out_stem>_precrop_inputs/`，JSONL 中 `source`/`dinov3_source`/`cropped_source` 会恢复为实际文件路径。
+
+从 V1.2 开始，`tools/predict_roi.py` 还会在外沿黑边/残余黑边裁剪 + blackpad 之前自动检测并对手机翻拍屏幕图片做预裁剪（screen-photo pre-crop）。检测逻辑通过固定色条纹（stripe_col/stripe_row > 0.24）和蓝色区域（blue_col/blue_row > 0.06）判断是否为翻拍图；若触发则先裁出喉镜窗口区域（tissue bbox → window frame → trim UI edges），再把裁后图送进黑边裁剪和加黑边流程。每条 JSONL 输出的 `pre_crop` 字段记录触发状态（`triggered`）、模式（`mode`）、触发原因（`reason`）、裁剪框（`box_xyxy`）、信号值（`signals`）、原始尺寸和预裁后尺寸；同一份信息也写入 `preprocess.pre_crop`，方便连同 V1.2 前处理一起审查。未触发的图片 `pre_crop.triggered` 为 `false`、`mode` 为 `"none"`。
 
 可复用检测和裁剪逻辑位于 `yoloposevf/screen_photo_crop.py`，提供 `classify_screen_photo()` 和 `crop_screen_photo_window()` 两个公共接口。独立批量预裁剪预览（含 contact sheet）仍可通过 `scripts/crop_527_xianlin.py` 使用。
-目录或列表输入会逐张流式推理并逐行写出 JSONL，避免大批量路径一次性送入 YOLO 时占满显存。YOLO-Pose 推理默认使用 GPU 0；只有明确需要 CPU 时才传 `--device cpu`。
+目录或列表输入默认以 `--batch 16` 分块送入 YOLO 批量推理，避免逐张调用模型导致 GPU 空转；单张 `--source` 会自动走同一入口并退化为 1 张。`--preprocess-workers N` 可并行执行 screen-photo pre-crop、去黑边和 blackpad 前处理，`0` 或 `1` 表示串行。需要完全复现旧逐张落盘路径时可传 `--batch 1 --preprocess-workers 0 --save-intermediates`。`--tta` 仍为逐张多增强聚合路径。YOLO-Pose 推理默认使用 GPU 0；只有明确需要 CPU 时才传 `--device cpu`。
 
 固定 JSONL holdout/manifest 推理可用 `--manifest`，脚本会优先读取每行的 `original_source`、`source_key`、`source`：
 
 ```bash
-python tools/predict_roi.py \
-  --weights Results/models/vf_roi_v1/best.pt \
+python tools/predict_current_roi.py \
   --manifest data/ldp_holdout/ldp_holdout_100_per_class_seed20260523.jsonl \
-  --postprocess-config Results/models/vf_roi_v1/postprocess.yaml \
-  --out Results/evaluation/vf_roi_v1_ldp_holdout/predictions.jsonl \
+  --out Results/evaluation/vf_roi_current_ldp_holdout/predictions_dinov3.jsonl \
   --device 0 \
   --imgsz 960
 
 python tools/summarize_ldp_holdout_predictions.py \
   --manifest data/ldp_holdout/ldp_holdout_100_per_class_seed20260523.jsonl \
-  --predictions Results/evaluation/vf_roi_v1_ldp_holdout/predictions.jsonl \
-  --out-dir Results/evaluation/vf_roi_v1_ldp_holdout
+  --predictions Results/evaluation/vf_roi_current_ldp_holdout/predictions_dinov3.jsonl \
+  --out-dir Results/evaluation/vf_roi_current_ldp_holdout
 ```
 
 每条输出包含：
@@ -328,6 +328,8 @@ python tools/summarize_ldp_holdout_predictions.py \
 - `consistency_score`
 - `roi_area_denominator` / `roi_area_denominator_mode` / `effective_image_bbox`
 - `roi_area_ratio` / `roi_area_factor`
+- `dinov3_aux`: DINOv3 point-region auxiliary scores and gate metadata
+- `pre_dinov3_aux_confidence` / `dinov3_aux_gate_action`: DINO gate applied to the YOLO-Pose confidence/action
 - `max_keypoint_outside_image_px` / `image_bounds_factor`
 - `roi_dark_fraction` / `roi_dark_factor`
 - `final_confidence`
@@ -387,7 +389,9 @@ python tools/crop_rois_from_predictions.py \
 ```
 
 如果分类模型需要统一看到正方形输入，可把所有 action 都尝试按预测框裁剪，并把裁剪图或无框 fallback
-原图拉伸到固定正方形。V1.1 黑边图只用于 ROI 定位；fallback 用 `original_source` 回到未加黑边的原图：
+输入拉伸到固定正方形。黑边图只用于 ROI 定位；默认 fallback 使用 `preprocessed_source`，即优先返回
+`cropped_source`/`dinov3_source` 对应的预裁剪、去黑边喉镜窗口，缺失时再退到 `original_source`，最后才退到
+黑边 `source`。这样手机翻拍屏幕图在 ROI 裁剪失败时也不会把完整手机照片送入下游分类器：
 
 ```bash
 python tools/crop_rois_from_predictions.py \
@@ -396,12 +400,13 @@ python tools/crop_rois_from_predictions.py \
   --out-dir Results/predictions/ldp_8class_square224_box_or_original \
   --crop-actions auto_accept manual_review reject_or_relabel \
   --fallback-original-on-crop-failure \
-  --copy-original-source original_source \
   --output-size 224 \
   --crop-mode polygon
 ```
 
-如果输入中包含手机翻拍屏幕图，fallback/保留原图时可改用 `--copy-original-source cropped_source`，让下游分类模型看到预裁剪且去黑边后的喉镜窗口，而不是完整手机照片。
+如果需要复现旧的“ROI 失败后回到未加黑边原图”口径，可显式传入 `--copy-original-source original_source`。
+DINOv3 打分阶段还会把 `dinov3_keypoints_outside_cropped_image` 作为不可用 ROI 信号：一旦关键点越出
+预处理后的 no-black/cropped 图，最终 action 会降级为 `reject_or_relabel`，交由上述 fallback 输入处理。
 
 训练完 4-class 分类模型后，可用下列工具在外部文件夹数据集上评估单个 checkpoint：
 

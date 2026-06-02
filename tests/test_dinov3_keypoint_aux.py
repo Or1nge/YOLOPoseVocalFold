@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
 from PIL import Image
 
-from tools.score_predictions_with_dinov3_aux import resolve_dinov3_prediction_input
+from tools.score_predictions_with_dinov3_aux import maybe_apply_gate, resolve_dinov3_prediction_input
 
 from yoloposevf.dinov3_aux import (
     DinoV3KeypointAuxHead,
@@ -176,3 +178,32 @@ def test_reward_only_gate_has_no_hard_reject_when_threshold_is_disabled() -> Non
     assert torch.allclose(factors, torch.tensor([1.0, 1.0, 1.0, 1.0, 1.25, 1.5]))
     assert direct_accept.tolist() == [False, False, False, False, False, True]
     assert hard_reject.tolist() == [False, False, False, False, False, False]
+
+
+def test_gate_rejects_keypoints_outside_cropped_image_warning() -> None:
+    record = {
+        "action": "auto_accept",
+        "final_confidence": 0.82,
+        "final_bbox": [1, 2, 3, 4],
+        "final_box_polygon": [[1, 1], [3, 1], [3, 4], [1, 4]],
+        "dinov3_aux": {
+            "warnings": ["dinov3_keypoints_outside_cropped_image"],
+            "confidence_factor": 1.5,
+            "direct_accept": True,
+            "hard_reject": False,
+        },
+    }
+
+    gated = maybe_apply_gate(
+        record,
+        postprocess_cfg=SimpleNamespace(auto_accept_threshold=0.43),
+        min_point_prob=0.30,
+        min_triplet_prob=0.30,
+        max_image_reject_prob=0.70,
+    )
+
+    assert gated["action"] == "reject_or_relabel"
+    assert gated["final_confidence"] == 0.0
+    assert gated["usable_bbox"] is None
+    assert gated["usable_box_polygon"] is None
+    assert gated["dinov3_aux_gate_action"] == "reject_keypoints_outside_cropped_image"

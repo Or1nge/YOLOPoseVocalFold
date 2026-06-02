@@ -1,13 +1,15 @@
 aux_config: configs/train_dinov3_keypoint_aux_y11m.yaml
 
-# Train the standard YOLO-Pose/containment model separately, then attach DINOv3
-# auxiliary scores to the prediction JSONL instead of doing contrast pretraining.
-base_pose_model: Results/containment_loss/yolo_pose_glottic_three_point_y11m_img960_pose24_containment_l0p05_ldp_pseudo_mixedpenalty_copy/weights/best.pt
+# Current main inference stack: train/update the YOLO-Pose and DINOv3 auxiliary
+# models separately, then attach DINOv3 scores to the prediction JSONL.
+base_pose_model: Results/models/vf_roi_current/pose_best.pt
+aux_checkpoint: Results/models/vf_roi_current/aux_best.pt
+postprocess_config: Results/models/vf_roi_current/postprocess.yaml
 prediction_jsonl: Results/predictions/predictions.jsonl
 scored_prediction_jsonl: Results/predictions/predictions_dinov3_aux.jsonl
 
 score_gate:
-  apply_confidence_gate: false
+  apply_confidence_gate: true
   min_point_prob: 0.30
   min_triplet_prob: 0.30
   max_image_reject_prob: 0.70

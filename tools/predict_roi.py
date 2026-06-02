@@ -4,7 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -18,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from yoloposevf.geometry import ImageSize
 from yoloposevf.postprocess import PosePrediction, PostprocessConfig, decide_action, fuse_prediction, load_postprocess_config
-from yoloposevf.preprocess import IMAGE_EXTENSIONS, blackpad_image_file
+from yoloposevf.preprocess import IMAGE_EXTENSIONS, blackpad_image
 from yoloposevf.screen_photo_crop import classify_screen_photo, crop_screen_photo_window
 
 
@@ -44,6 +45,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cropped-input-dir", type=Path, help="Directory for generated cropped/no-black DINO inputs.")
     parser.add_argument("--precrop-input-dir", type=Path, help="Directory for screen-photo pre-cropped intermediate images.")
     parser.add_argument("--black-border-luma-floor", type=float, default=8.0)
+    parser.add_argument("--batch", type=int, default=16, help="Batch size for non-TTA GPU inference.")
+    parser.add_argument(
+        "--preprocess-workers",
+        type=int,
+        default=0,
+        help="Parallel workers for screen-photo pre-crop + blackpad. 0 or 1 means serial.",
+    )
+    parser.add_argument(
+        "--save-intermediates",
+        action="store_true",
+        help="Persist pre-crop, cropped, and black-padded intermediate images. Defaults to in-memory preprocessing.",
+    )
     return parser.parse_args()
 
 
@@ -114,6 +127,13 @@ def relative_image_path(image_path: Path, source: Path) -> Path:
     return image_path.relative_to(source)
 
 
+@dataclass(frozen=True)
+class PreparedImage:
+    source_ref: str
+    yolo_source: Any
+    model_input_image: Image.Image
+
+
 def _build_pre_crop_info(
     *,
     triggered: bool,
@@ -140,6 +160,116 @@ def _build_pre_crop_info(
     return info
 
 
+def _process_single_image(
+    image_path: Path,
+    record: dict[str, Any],
+    rel: Path,
+    index: int,
+    *,
+    precrop_root: Path,
+    pad_root: Path,
+    crop_root: Path,
+    blackpad_fraction: float,
+    blackpad_min_padding: int,
+    black_border_luma_floor: float,
+    save_intermediates: bool,
+) -> tuple[PreparedImage, dict[str, Any]]:
+    with Image.open(image_path) as img:
+        img = img.convert("RGB")
+        triggered, signals = classify_screen_photo(img)
+        if triggered:
+            pre_cropped, pre_crop_box = crop_screen_photo_window(img)
+            working_image = pre_cropped
+            pre_crop_info = _build_pre_crop_info(
+                triggered=True,
+                mode="screen_photo_precrop",
+                reason=signals.get("reason", []),
+                box_xyxy=pre_crop_box,
+                signals={k: v for k, v in signals.items() if k != "reason"},
+                original_width=img.width,
+                original_height=img.height,
+                cropped_width=pre_cropped.width,
+                cropped_height=pre_cropped.height,
+            )
+            if save_intermediates:
+                precrop_dest = precrop_root / rel
+                _save_image(pre_cropped, precrop_dest)
+        else:
+            working_image = img.copy()
+            pre_crop_info = _build_pre_crop_info(
+                triggered=False,
+                mode="none",
+                reason=signals.get("reason", ["none"]),
+                box_xyxy=None,
+                signals={k: v for k, v in signals.items() if k != "reason"},
+                original_width=img.width,
+                original_height=img.height,
+                cropped_width=None,
+                cropped_height=None,
+            )
+
+    cropped_destination = crop_root / rel
+    destination = pad_root / rel
+    if save_intermediates:
+        padded, cropped, info = blackpad_image(
+            working_image,
+            fraction=blackpad_fraction,
+            min_padding=blackpad_min_padding,
+            black_border_luma_floor=black_border_luma_floor,
+            cropped_source=cropped_destination,
+        )
+        if cropped_destination is not None:
+            _save_image(cropped, cropped_destination)
+        _save_image(padded, destination)
+        source_ref = str(destination.resolve())
+        yolo_source: Any = str(destination.resolve())
+        cropped_source: str | None = str(cropped_destination.resolve())
+    else:
+        padded, cropped, info = blackpad_image(
+            working_image,
+            fraction=blackpad_fraction,
+            min_padding=blackpad_min_padding,
+            black_border_luma_floor=black_border_luma_floor,
+            cropped_source=None,
+        )
+        source_ref = f"memory://model_input/{index}/{rel.as_posix()}"
+        yolo_source = pil_to_numpy(padded)
+        cropped_source = None
+    preprocess_info = info.to_dict()
+    preprocess_info["pre_crop"] = pre_crop_info
+    preprocess_info["model_input_saved"] = bool(save_intermediates)
+    preprocess_info["cropped_source_saved"] = bool(save_intermediates)
+    meta: dict[str, Any] = {
+        "source": source_ref,
+        "original_source": str(image_path.resolve()),
+        "dinov3_source": cropped_source,
+        "cropped_source": cropped_source,
+        "preprocess": preprocess_info,
+        "pre_crop": pre_crop_info,
+        "manifest_index": index,
+        "class_name": record.get("class_name"),
+        "source_key": record.get("source_key"),
+        "_model_input_image": padded,
+    }
+    return PreparedImage(source_ref=source_ref, yolo_source=yolo_source, model_input_image=padded), meta
+
+
+def _save_image(image: Image.Image, destination: Path, *, jpeg_quality: int = 95) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    save_kwargs = {}
+    if destination.suffix.lower() in {".jpg", ".jpeg"}:
+        save_kwargs["quality"] = int(jpeg_quality)
+        save_kwargs["subsampling"] = 0
+    image.save(destination, **save_kwargs)
+
+
+def pil_to_numpy(image: Image.Image) -> "Any":
+    import numpy as np
+
+    rgb = np.asarray(image.convert("RGB"))
+    return np.ascontiguousarray(rgb[:, :, ::-1])
+
+
 def prepare_inference_images(
     source: Path | None,
     *,
@@ -151,7 +281,9 @@ def prepare_inference_images(
     blackpad_fraction: float = 0.30,
     blackpad_min_padding: int = 80,
     black_border_luma_floor: float = 8.0,
-) -> tuple[list[Path], dict[str, dict[str, Any]]]:
+    preprocess_workers: int = 0,
+    save_intermediates: bool = False,
+) -> tuple[list[PreparedImage], dict[str, dict[str, Any]]]:
     manifest_records = read_manifest_records(manifest) if manifest is not None else []
     if manifest_records:
         image_rows = [(manifest_image_path(record), record) for record in manifest_records]
@@ -163,76 +295,62 @@ def prepare_inference_images(
     pad_root = (blackpad_input_dir or default_blackpad_input_dir(out_path)).resolve()
     crop_root = (cropped_input_dir or default_cropped_input_dir(out_path)).resolve()
     precrop_root = (precrop_input_dir or default_precrop_input_dir(out_path)).resolve()
-    model_input_images: list[Path] = []
+
+    # Pre-compute relative paths sequentially so manifest uniqueness is deterministic.
     used_rel_paths: set[Path] = set()
+    rel_paths: list[Path] = []
     for index, (image_path, record) in enumerate(image_rows):
         if manifest_records:
             rel = unique_manifest_relative_path(record, image_path, index, used_rel_paths)
         else:
             assert source is not None
             rel = relative_image_path(image_path, source)
+        rel_paths.append(rel)
 
-        # Step 0: Screen-photo pre-crop classification and optional cropping.
-        with Image.open(image_path) as img:
-            img = img.convert("RGB")
-            triggered, signals = classify_screen_photo(img)
-            if triggered:
-                pre_cropped, pre_crop_box = crop_screen_photo_window(img)
-                precrop_dest = precrop_root / rel
-                precrop_dest.parent.mkdir(parents=True, exist_ok=True)
-                pre_cropped.save(precrop_dest, quality=95, subsampling=0)
-                working_source = precrop_dest
-                pre_crop_info = _build_pre_crop_info(
-                    triggered=True,
-                    mode="screen_photo_precrop",
-                    reason=signals.get("reason", []),
-                    box_xyxy=pre_crop_box,
-                    signals={k: v for k, v in signals.items() if k != "reason"},
-                    original_width=img.width,
-                    original_height=img.height,
-                    cropped_width=pre_cropped.width,
-                    cropped_height=pre_cropped.height,
-                )
-            else:
-                working_source = image_path
-                pre_crop_info = _build_pre_crop_info(
-                    triggered=False,
-                    mode="none",
-                    reason=signals.get("reason", ["none"]),
-                    box_xyxy=None,
-                    signals={k: v for k, v in signals.items() if k != "reason"},
-                    original_width=img.width,
-                    original_height=img.height,
-                    cropped_width=None,
-                    cropped_height=None,
-                )
+    process_kwargs = dict(
+        precrop_root=precrop_root,
+        pad_root=pad_root,
+        crop_root=crop_root,
+        blackpad_fraction=blackpad_fraction,
+        blackpad_min_padding=blackpad_min_padding,
+        black_border_luma_floor=black_border_luma_floor,
+        save_intermediates=save_intermediates,
+    )
 
-        # Step 1: Black-border crop + blackpad (existing V1.2 pipeline).
-        cropped_destination = crop_root / rel
-        destination = pad_root / rel
-        info = blackpad_image_file(
-            working_source,
-            destination,
-            fraction=blackpad_fraction,
-            min_padding=blackpad_min_padding,
-            black_border_luma_floor=black_border_luma_floor,
-            cropped_destination=cropped_destination,
-        )
-        model_input_images.append(destination)
-        cropped_source = str(cropped_destination.resolve())
-        preprocess_info = info.to_dict()
-        preprocess_info["pre_crop"] = pre_crop_info
-        metadata[str(destination.resolve())] = {
-            "source": str(destination.resolve()),
-            "original_source": str(image_path.resolve()),
-            "dinov3_source": cropped_source,
-            "cropped_source": cropped_source,
-            "preprocess": preprocess_info,
-            "pre_crop": pre_crop_info,
-            "manifest_index": index,
-            "class_name": record.get("class_name"),
-            "source_key": record.get("source_key"),
-        }
+    image_records = [
+        (index, image_path, record, rel)
+        for index, ((image_path, record), rel) in enumerate(zip(image_rows, rel_paths))
+    ]
+
+    if preprocess_workers > 1:
+        with ThreadPoolExecutor(max_workers=preprocess_workers) as executor:
+            future_to_idx: dict[Any, int] = {}
+            for idx, image_path, record, rel in image_records:
+                future = executor.submit(
+                    _process_single_image,
+                    image_path, record, rel, idx,
+                    **process_kwargs,
+                )
+                future_to_idx[future] = idx
+            results: list[tuple[PreparedImage, dict[str, Any]] | None] = [None] * len(image_rows)
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                results[idx] = future.result()
+    else:
+        results = []
+        for idx, image_path, record, rel in image_records:
+            results.append(_process_single_image(
+                image_path, record, rel, idx,
+                **process_kwargs,
+            ))
+
+    model_input_images: list[PreparedImage] = []
+    for item in results:
+        if item is None:
+            raise RuntimeError("preprocessing worker did not return a result")
+        prepared, meta = item
+        model_input_images.append(prepared)
+        metadata[prepared.source_ref] = meta
     return model_input_images, metadata
 
 
@@ -386,6 +504,41 @@ def polygon_dark_fraction(
     return float((image_array[mask_array] < effective_threshold).mean()), effective_threshold, reference_luma
 
 
+def polygon_dark_fraction_from_image(
+    image: Image.Image,
+    polygon: Sequence[Sequence[float]],
+    luma_threshold: float,
+    *,
+    mode: str = "absolute",
+    relative_luma_ratio: float = 0.80,
+    foreground_luma_floor: float = 8.0,
+) -> tuple[float | None, float | None, float | None]:
+    try:
+        import numpy as np
+        from PIL import ImageDraw
+    except ImportError:
+        return None, None, None
+
+    if not polygon:
+        return None, None, None
+    image_l = image.convert("L")
+    mask = Image.new("1", image_l.size, 0)
+    points = [(float(point[0]), float(point[1])) for point in polygon]
+    ImageDraw.Draw(mask).polygon(points, fill=1)
+    image_array = np.asarray(image_l)
+    mask_array = np.asarray(mask, dtype=bool)
+    if not mask_array.any():
+        return 0.0, None, None
+    effective_threshold, reference_luma = _relative_dark_threshold(
+        image_array,
+        mode=mode,
+        absolute_threshold=luma_threshold,
+        relative_ratio=relative_luma_ratio,
+        foreground_luma_floor=foreground_luma_floor,
+    )
+    return float((image_array[mask_array] < effective_threshold).mean()), effective_threshold, reference_luma
+
+
 def foreground_bbox(
     image_path: Path,
     *,
@@ -453,7 +606,13 @@ def prediction_with_effective_area(
     )
 
 
-def apply_image_quality_gates(record: dict[str, Any], image_path: Path, cfg: PostprocessConfig) -> dict[str, Any]:
+def apply_image_quality_gates(
+    record: dict[str, Any],
+    image_path: Path,
+    cfg: PostprocessConfig,
+    *,
+    image: Image.Image | None = None,
+) -> dict[str, Any]:
     dark_mode = str(cfg.roi_dark_mode).lower()
     dark_gate_enabled = cfg.good_roi_dark_fraction > 0.0 and (
         dark_mode != "absolute" or cfg.roi_dark_luma_threshold > 0.0
@@ -462,8 +621,17 @@ def apply_image_quality_gates(record: dict[str, Any], image_path: Path, cfg: Pos
         return record
 
     polygon = record.get("final_box_polygon") or record.get("roi_polygon")
-    dark_fraction, effective_threshold, reference_luma = (
-        polygon_dark_fraction(
+    if polygon and image is not None:
+        dark_fraction, effective_threshold, reference_luma = polygon_dark_fraction_from_image(
+            image,
+            polygon,
+            cfg.roi_dark_luma_threshold,
+            mode=dark_mode,
+            relative_luma_ratio=cfg.roi_dark_relative_luma_ratio,
+            foreground_luma_floor=cfg.roi_dark_foreground_luma_floor,
+        )
+    elif polygon:
+        dark_fraction, effective_threshold, reference_luma = polygon_dark_fraction(
             image_path,
             polygon,
             cfg.roi_dark_luma_threshold,
@@ -471,9 +639,8 @@ def apply_image_quality_gates(record: dict[str, Any], image_path: Path, cfg: Pos
             relative_luma_ratio=cfg.roi_dark_relative_luma_ratio,
             foreground_luma_floor=cfg.roi_dark_foreground_luma_floor,
         )
-        if polygon
-        else (None, None, None)
-    )
+    else:
+        dark_fraction, effective_threshold, reference_luma = None, None, None
     dark_factor = lower_bound_factor(dark_fraction, cfg.min_roi_dark_fraction, cfg.good_roi_dark_fraction)
     record["roi_dark_fraction"] = dark_fraction
     record["roi_dark_factor"] = dark_factor
@@ -496,7 +663,7 @@ def apply_image_quality_gates(record: dict[str, Any], image_path: Path, cfg: Pos
     return record
 
 
-def aggregate_predictions(predictions: Sequence[PosePrediction], source: Path) -> PosePrediction | None:
+def aggregate_predictions(predictions: Sequence[PosePrediction], source: Path | str) -> PosePrediction | None:
     if not predictions:
         return None
     weights = [prediction_weight(prediction) for prediction in predictions]
@@ -520,10 +687,44 @@ def aggregate_predictions(predictions: Sequence[PosePrediction], source: Path) -
     )
 
 
+def _predict_batched(
+    model: Any,
+    images: list[PreparedImage],
+    predict_kwargs: dict[str, Any],
+    batch_size: int,
+):
+    """Yield (source_str, prediction_or_None, vote_count) in input order.
+
+    Images are processed in chunks of *batch_size* via
+    ``model.predict(source=[...], stream=True, batch=batch_size)``.
+    Results are mapped back to input paths so output order is preserved
+    regardless of prediction completion order.
+    """
+    batch_size = max(1, int(batch_size))
+    for i in range(0, len(images), batch_size):
+        chunk = images[i : i + batch_size]
+        if len(chunk) == 1:
+            item = chunk[0]
+            results = model.predict(source=item.yolo_source, stream=True, **predict_kwargs)
+            for result in results:
+                yield item.source_ref, result_to_prediction(result, source=item.source_ref), 1
+            continue
+        source_list = [item.yolo_source for item in chunk]
+        batch_results = list(model.predict(source=source_list, stream=True, batch=batch_size, **predict_kwargs))
+        if len(batch_results) != len(chunk):
+            raise RuntimeError(
+                f"YOLO returned {len(batch_results)} result(s) for {len(chunk)} input image(s)"
+            )
+        for item, result in zip(chunk, batch_results):
+            pred = result_to_prediction(result, source=item.source_ref)
+            yield item.source_ref, pred, 1
+
+
 def predict_with_tta(
     model: Any,
-    image_path: Path,
+    image_source: Path | Image.Image,
     *,
+    source_ref: str,
     conf: float,
     device: str | None,
     imgsz: int | None,
@@ -534,9 +735,12 @@ def predict_with_tta(
     import numpy as np
     from PIL import Image
 
-    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-    if image is None:
-        image = cv2.cvtColor(np.array(Image.open(image_path).convert("RGB")), cv2.COLOR_RGB2BGR)
+    if isinstance(image_source, Image.Image):
+        image = cv2.cvtColor(np.asarray(image_source.convert("RGB")), cv2.COLOR_RGB2BGR)
+    else:
+        image = cv2.imread(str(image_source), cv2.IMREAD_COLOR)
+        if image is None:
+            image = cv2.cvtColor(np.array(Image.open(image_source).convert("RGB")), cv2.COLOR_RGB2BGR)
     height, width = image.shape[:2]
     center = (width / 2.0, height / 2.0)
     predictions: list[PosePrediction] = []
@@ -559,13 +763,16 @@ def predict_with_tta(
                 predict_kwargs["imgsz"] = imgsz
             results = model.predict(**predict_kwargs)
             for result in results:
-                prediction = result_to_prediction(result, source=str(image_path), inverse_affine=inverse)
+                prediction = result_to_prediction(result, source=source_ref, inverse_affine=inverse)
                 if prediction is not None:
                     predictions.append(prediction)
-    return aggregate_predictions(predictions, image_path), len(predictions)
+    return aggregate_predictions(predictions, source_ref), len(predictions)
 
 
 def metadata_for_source(metadata: dict[str, dict[str, Any]], source: str | Path) -> dict[str, Any]:
+    raw = str(source)
+    if raw in metadata:
+        return metadata[raw]
     path = Path(str(source))
     return metadata.get(
         str(path.resolve()),
@@ -615,8 +822,15 @@ def main() -> None:
         blackpad_fraction=args.blackpad_fraction,
         blackpad_min_padding=args.blackpad_min_padding,
         black_border_luma_floor=args.black_border_luma_floor,
+        preprocess_workers=args.preprocess_workers,
+        save_intermediates=(
+            args.save_intermediates
+            or args.blackpad_input_dir is not None
+            or args.cropped_input_dir is not None
+            or args.precrop_input_dir is not None
+        ),
     )
-    predict_kwargs: dict[str, Any] = {"conf": args.conf, "stream": True, "verbose": False}
+    predict_kwargs: dict[str, Any] = {"conf": args.conf, "verbose": False}
     if args.device is not None:
         predict_kwargs["device"] = args.device
     if args.imgsz is not None:
@@ -629,23 +843,20 @@ def main() -> None:
             degrees = parse_float_list(args.tta_degrees)
             scales = parse_float_list(args.tta_scales)
             result_iter = []
-            for image_path in images:
+            for item in images:
                 prediction, vote_count = predict_with_tta(
                     model,
-                    image_path,
+                    item.model_input_image,
+                    source_ref=item.source_ref,
                     conf=args.conf,
                     device=args.device,
                     imgsz=args.imgsz,
                     degrees=degrees,
                     scales=scales,
                 )
-                result_iter.append((str(image_path), prediction, vote_count))
+                result_iter.append((item.source_ref, prediction, vote_count))
         else:
-            result_iter = (
-                (str(image_path), result_to_prediction(result, source=str(image_path)), 1)
-                for image_path in images
-                for result in model.predict(source=str(image_path.resolve()), **predict_kwargs)
-            )
+            result_iter = _predict_batched(model, images, predict_kwargs, args.batch)
 
         for source, prediction, vote_count in result_iter:
             metadata = metadata_for_source(source_metadata, prediction.source if prediction is not None else source)
@@ -658,7 +869,12 @@ def main() -> None:
             else:
                 prediction = prediction_with_effective_area(prediction, metadata, cfg)
                 record = fuse_prediction(prediction, cfg)
-                record = apply_image_quality_gates(record, Path(metadata["source"]), cfg)
+                record = apply_image_quality_gates(
+                    record,
+                    Path(metadata["source"]),
+                    cfg,
+                    image=metadata.get("_model_input_image"),
+                )
                 record["keypoints"] = [list(kp) for kp in prediction.keypoints]
                 record["image_size"] = {
                     "width": prediction.image_size.width,

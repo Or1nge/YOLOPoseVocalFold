@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from tools.predict_roi import prepare_inference_images
 from yoloposevf.preprocess import (
+    blackpad_image,
     blackpad_image_file,
     blackpad_padding,
     crop_black_border_image_file,
     crop_existing_black_borders,
+    detect_edge_artifact_crop,
 )
 
 
@@ -81,6 +83,50 @@ def test_blackpad_image_file_crops_existing_black_border_before_padding(tmp_path
         assert padded.getpixel((6, 6)) == (160, 120, 80)
 
 
+def test_blackpad_image_crops_rounded_black_frame_with_white_corners() -> None:
+    image = Image.new("RGB", (100, 70), color=(255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((0, 0, 99, 69), radius=24, fill=(0, 0, 0))
+    draw.rounded_rectangle((21, 16, 79, 54), radius=7, fill=(170, 70, 45))
+
+    padded, cropped, info = blackpad_image(image, fraction=0.20, min_padding=5)
+
+    assert info.edge_artifact_crop_was_applied is True
+    assert info.edge_artifact_crop_reason == "large_edge_black_region"
+    assert info.crop_bbox_xyxy[0] >= 18
+    assert info.crop_bbox_xyxy[1] >= 13
+    assert info.crop_bbox_xyxy[2] <= 83
+    assert info.crop_bbox_xyxy[3] <= 58
+    assert cropped.size[0] < 70
+    assert cropped.size[1] < 50
+    assert padded.getpixel((0, 0)) == (0, 0, 0)
+
+
+def test_blackpad_image_crops_partial_edge_black_strip() -> None:
+    image = Image.new("RGB", (100, 60), color=(170, 70, 45))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 19, 59), fill=(0, 0, 0))
+
+    _, cropped, info = blackpad_image(image, fraction=0.20, min_padding=5)
+
+    assert info.edge_artifact_crop_was_applied is True
+    assert info.crop_bbox_xyxy == (20, 0, 100, 60)
+    assert cropped.size == (80, 60)
+
+
+def test_edge_artifact_detection_does_not_crop_clean_full_frame() -> None:
+    image = Image.new("RGB", (90, 60), color=(170, 70, 45))
+
+    info = detect_edge_artifact_crop(image)
+    _, cropped, preprocess_info = blackpad_image(image, fraction=0.20, min_padding=5)
+
+    assert info.was_applied is False
+    assert info.reason == "no_large_edge_black_region"
+    assert preprocess_info.edge_artifact_crop_was_applied is False
+    assert preprocess_info.crop_bbox_xyxy == (0, 0, 90, 60)
+    assert cropped.size == (90, 60)
+
+
 def test_crop_existing_black_borders_keeps_all_black_images_full_size() -> None:
     image = Image.new("RGB", (10, 8), color=(0, 0, 0))
     cropped, bbox = crop_existing_black_borders(image)
@@ -133,18 +179,19 @@ def test_prediction_preprocess_always_crops_then_blackpads(tmp_path) -> None:
     )
 
     assert len(images) == 1
-    record = metadata[str(images[0].resolve())]
-    assert record["source"] != record["cropped_source"]
-    assert record["dinov3_source"] == record["cropped_source"]
+    record = metadata[images[0].source_ref]
+    assert record["source"].startswith("memory://model_input/")
+    assert record["cropped_source"] is None
+    assert record["dinov3_source"] is None
     assert record["original_source"] == str(source.resolve())
     assert record["preprocess"]["type"] == "crop_black_border_then_blackpad"
     assert record["preprocess"]["crop_bbox_xyxy"] == [4, 3, 16, 9]
     assert record["preprocess"]["padding_px"] == 6
+    assert record["preprocess"]["model_input_saved"] is False
     assert record["pre_crop"]["triggered"] is False
     assert record["pre_crop"]["reason"] == ["none"]
     assert record["preprocess"]["pre_crop"] == record["pre_crop"]
-    with Image.open(images[0]) as image:
-        assert image.size == (24, 18)
+    assert images[0].model_input_image.size == (24, 18)
 
 
 def test_prediction_preprocess_records_screen_photo_precrop(tmp_path) -> None:
@@ -172,7 +219,7 @@ def test_prediction_preprocess_records_screen_photo_precrop(tmp_path) -> None:
         black_border_luma_floor=8.0,
     )
 
-    record = metadata[str(images[0].resolve())]
+    record = metadata[images[0].source_ref]
     pre_crop = record["pre_crop"]
     assert pre_crop["triggered"] is True
     assert pre_crop["mode"] == "screen_photo_precrop"
@@ -181,3 +228,31 @@ def test_prediction_preprocess_records_screen_photo_precrop(tmp_path) -> None:
     assert pre_crop["original_height"] == 300
     assert pre_crop["cropped_width"] < 400
     assert record["preprocess"]["pre_crop"] == pre_crop
+
+
+def test_prediction_preprocess_can_save_intermediates(tmp_path) -> None:
+    source_dir = tmp_path / "images"
+    source_dir.mkdir()
+    source = source_dir / "sample.png"
+    Image.new("RGB", (20, 12), color=(160, 120, 80)).save(source)
+
+    images, metadata = prepare_inference_images(
+        source_dir,
+        manifest=None,
+        out_path=tmp_path / "predictions.jsonl",
+        blackpad_input_dir=None,
+        cropped_input_dir=None,
+        blackpad_fraction=0.50,
+        blackpad_min_padding=2,
+        black_border_luma_floor=8.0,
+        save_intermediates=True,
+    )
+
+    record = metadata[images[0].source_ref]
+    assert record["source"] == images[0].source_ref
+    assert record["cropped_source"] is not None
+    assert record["dinov3_source"] == record["cropped_source"]
+    assert record["preprocess"]["model_input_saved"] is True
+    assert record["preprocess"]["cropped_source_saved"] is True
+    with Image.open(record["source"]) as image:
+        assert image.size == images[0].model_input_image.size

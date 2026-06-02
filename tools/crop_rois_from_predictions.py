@@ -57,9 +57,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--copy-original-source",
-        choices=["source", "original_source", "cropped_source"],
-        default="source",
-        help="Which record path to use when retaining/falling back to an original image.",
+        choices=["source", "original_source", "cropped_source", "preprocessed_source"],
+        default="preprocessed_source",
+        help=(
+            "Which record path to use when retaining/falling back to an uncropped image. "
+            "preprocessed_source prefers cropped_source/dinov3_source, then original_source, then source."
+        ),
     )
     parser.add_argument(
         "--output-size",
@@ -180,11 +183,26 @@ def save_original_image(source: Path, destination: Path, *, output_size: int, qu
     save_image(square_resize(image, output_size), destination, quality)
 
 
+def _existing_record_path(record: dict[str, Any], fields: Sequence[str]) -> Path | None:
+    for field in fields:
+        value = record.get(field)
+        if not value:
+            continue
+        path = Path(str(value))
+        if path.exists():
+            return path
+    return None
+
+
 def original_source_for_record(record: dict[str, Any], source: Path, mode: str) -> Path:
-    if mode in {"original_source", "cropped_source"}:
-        original = record.get(mode)
-        if original:
-            return Path(str(original))
+    if mode == "preprocessed_source":
+        path = _existing_record_path(record, ("cropped_source", "dinov3_source", "original_source"))
+        if path is not None:
+            return path
+    elif mode in {"original_source", "cropped_source"}:
+        value = record.get(mode)
+        if value:
+            return Path(str(value))
     return source
 
 

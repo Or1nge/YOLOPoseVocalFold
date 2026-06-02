@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- Changed downstream ROI crop export so fallback/retained images default to
+  `preprocessed_source`: use the saved no-black/cropped image
+  (`cropped_source`/`dinov3_source`) when available, then fall back to
+  `original_source`, and only use the black-padded `source` if no cleaner input
+  exists. This keeps screen-photo pre-crops in the classifier path when ROI
+  geometry is rejected or fails.
+- Treat `dinov3_keypoints_outside_cropped_image` as an unusable ROI signal
+  during DINOv3 gating: predictions with keypoints outside the no-black/cropped
+  image are downgraded to `reject_or_relabel` instead of being auto-cropped.
+- Replaced the edge white-corner special case with a general edge-artifact crop
+  in the default ROI preprocessing path. The new detector triggers from large
+  near-black regions connected to the image edge, then removes edge-connected
+  black border/background and neutral bright corner/UI pixels before the usual
+  no-black crop + blackpad step. Prediction JSONL metadata now records the
+  edge-artifact crop box and trigger diagnostics.
+- Promoted the DINOv3-assisted ROI stack to the project main model via the
+  local `Results/models/vf_roi_current/` alias and the new
+  `tools/predict_current_roi.py` wrapper, which runs YOLO-Pose first and then
+  applies DINOv3 auxiliary confidence gating.
+- Batched the default non-TTA ROI prediction path in `tools/predict_roi.py`:
+  `--batch` now sends prepared images to YOLO in GPU batches, while
+  `--preprocess-workers` can parallelize screen-photo pre-crop, black-border
+  crop, and blackpad generation. Intermediate pre-crop/no-black/blackpad images
+  now stay in memory by default and are only written when `--save-intermediates`
+  is passed or explicit intermediate directories are provided. Single-image
+  `--source` still uses the same entrypoint; `--tta` remains the slower
+  per-image aggregation path.
 - Added screen-photo pre-crop to the ROI prediction pipeline: `tools/predict_roi.py` now classifies each image as a clean frame or a messy phone-photo-of-screen (via fixed-color stripe and blue-region signals), and when triggered, crops out the laryngoscope window before the existing black-border crop + blackpad step. The reusable detection/cropping logic lives in `yoloposevf/screen_photo_crop.py`; the `scripts/crop_527_xianlin.py` standalone pre-cropper imports from it. JSONL outputs carry a new `pre_crop` audit section, mirrored under `preprocess.pre_crop`, while preserving the existing `source`/`original_source`/`cropped_source`/`dinov3_source` contract; `tools/crop_rois_from_predictions.py` can now use `--copy-original-source cropped_source` for screen-photo fallback images.
 
 - Made `tools/predict_roi.py` default to GPU 0 for YOLO-Pose inference; pass
