@@ -267,7 +267,7 @@ python tools/score_predictions_with_dinov3_aux.py \
 ```
 
 默认只追加 `dinov3_aux` 字段，不改变原来的 `final_confidence/action`。需要让 auxiliary score 修改置信度时，再加 `--apply-confidence-gate`。设计说明见 `docs/dinov3_keypoint_aux_design_20260524.md`。
-当前 gate 会把极低 DINO 分作为拒绝信号：`point_region_score < 0.10` 标为 `reject_or_relabel`，`0.10-0.30` 不改变原置信度，`0.30-0.60` 按比例从 `1.0x` 奖励到 `1.5x`，`>=0.60` 作为极高分 DINO 直接通过候选。2026-05-24 评估见 `docs/dinov3_point_region_hardneg_evaluation_20260524.md`。
+当前 gate 会把极低 DINO 分作为拒绝信号：`point_region_score < 0.10` 标为 `reject_or_relabel`，`0.10-0.30` 不改变原置信度，`0.30-0.60` 按比例从 `1.0x` 奖励到 `1.5x`，`>=0.60` 作为极高分 DINO 直接通过候选。默认 `geometric_mean` 分数使用两个最高点概率的几何平均 `sqrt(top1 * top2)`，不再要求三个点都同时高分。2026-05-24 评估见 `docs/dinov3_point_region_hardneg_evaluation_20260524.md`。
 
 ## 推理
 

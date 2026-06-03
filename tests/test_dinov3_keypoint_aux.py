@@ -16,6 +16,7 @@ from yoloposevf.dinov3_aux import (
     build_point_targets,
     dinov3_confidence_gate,
     foreground_mask_from_images,
+    point_region_score_from_probs,
     sample_point_features,
     sample_oriented_point_regions,
     sample_oriented_point_region_masks,
@@ -68,6 +69,20 @@ def test_oriented_point_region_head_scores_shapes() -> None:
     assert scores["direct_accept"].shape == (2,)
     assert scores["hard_reject"].shape == (2,)
     assert scores["valid_fraction"].shape == (2,)
+
+
+def test_geometric_point_region_score_uses_top_two_points() -> None:
+    point_probs = torch.tensor(
+        [
+            [0.81, 0.64, 0.01],
+            [0.90, 0.04, 0.25],
+        ],
+        dtype=torch.float32,
+    )
+
+    scores = point_region_score_from_probs(point_probs, score_mode="geometric_mean")
+
+    assert torch.allclose(scores, torch.tensor([(0.81 * 0.64) ** 0.5, (0.90 * 0.25) ** 0.5]))
 
 
 def test_mask_aware_point_head_uses_valid_patch_mask() -> None:

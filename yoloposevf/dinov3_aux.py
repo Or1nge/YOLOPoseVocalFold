@@ -480,6 +480,20 @@ def dinov3_confidence_gate(
     return reward_factor, direct_accept, hard_reject
 
 
+def point_region_score_from_probs(
+    point_probs: torch.Tensor,
+    *,
+    score_mode: str = "geometric_mean",
+) -> torch.Tensor:
+    score_mode = str(score_mode).lower()
+    if score_mode == "min":
+        return point_probs.min(dim=1).values
+    if score_mode == "geometric_mean":
+        top_two = point_probs.clamp_min(1e-6).topk(k=2, dim=1).values
+        return top_two.prod(dim=1).sqrt()
+    raise ValueError("DINOv3 score_mode must be 'geometric_mean' or 'min'.")
+
+
 def score_aux_triplet(
     head: DinoV3KeypointAuxHead,
     feature_map: torch.Tensor,
@@ -522,10 +536,7 @@ def score_aux_triplet(
     point_logits = head.point_logits(point_features, triplets01, valid_mask=point_valid_mask)
     expected = torch.arange(1, 4, device=triplets01.device).view(1, 3)
     point_probs = F.softmax(point_logits, dim=-1).gather(-1, expected[:, :, None].expand(triplets01.shape[0], -1, 1)).squeeze(-1)
-    if score_mode == "min":
-        point_region_score = point_probs.min(dim=1).values
-    else:
-        point_region_score = point_probs.clamp_min(1e-6).prod(dim=1).pow(1.0 / 3.0)
+    point_region_score = point_region_score_from_probs(point_probs, score_mode=score_mode)
     confidence_factor, direct_accept, hard_reject = dinov3_confidence_gate(
         point_region_score,
         gate_mode=gate_mode,
